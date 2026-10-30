@@ -10,6 +10,7 @@
 | deepagents | 0.7.32（官方 PyPI 包，未拉 375MB 的整仓源码，也不需要 deepagents-code） |
 | langchain / langgraph | 1.4.7 / 1.2.18 |
 | langchain-deepseek | 1.1.1 |
+| langgraph-checkpoint-sqlite | 3.1.2（会话持久化） |
 | 服务端口 | 3200 |
 
 ## 模型名说明（重要）
@@ -38,17 +39,21 @@ cd agent && ./.venv/Scripts/python.exe app.py
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/health` | 健康检查，返回模型 ID 与工具列表 |
+| GET | `/health` | 健康检查，返回模型 ID、工具列表与存储类型 |
 | GET | `/tools` | 已注册工具 |
-| POST | `/chat` | 同步对话：`{"message": "...", "thread_id": "demo"}` |
-| POST | `/chat/stream` | SSE 流式，逐节点推送 model / tools 执行过程 |
-| GET | `/threads/{thread_id}` | 查看某会话完整消息历史 |
+| GET | `/sessions?user_id=` | 会话列表（按最近活跃时间倒序，默认不含空会话） |
+| POST | `/sessions` | 新建会话：`{"user_id": "..."}`，同时清理该用户无对话的空会话 |
+| PATCH | `/sessions/{id}` | 重命名会话：`{"title": "..."}` |
+| DELETE | `/sessions/{id}` | 删除会话，连同对话记录（checkpoint）一起清掉 |
+| GET | `/threads/{thread_id}` | 某会话历史，已压成前端气泡结构（`user` / `agent` + `tools`） |
+| POST | `/chat` | 同步对话：`{"message": "...", "thread_id": "demo", "user_id": "..."}` |
+| POST | `/chat/stream` | SSE 流式，逐 token 推送 |
 
-`/chat/stream` 同时订阅 `messages`（逐 token 增量）与 `updates`（节点快照），事件类型为 `token` / `ai` / `tool` / `error`，前端可直接做打字机渲染。
+`/chat/stream` 同时订阅 `messages`（逐 token 增量）与 `updates`（节点快照），事件类型为 `token` / `ai` / `tool` / `session` / `error`；`tool` 事件带 `tool_call_id`，前端据此精确回填工具结果（并发工具返回顺序不定）。一轮结束后会推一条 `session` 事件，回传该会话的最新标题与轮数。
 
 CRM 前端「AI 助手」页（`/agent`）通过 Next rewrite `/agent-api/*` 代理到本服务，无需额外配置 CORS。
 
-`thread_id` 相同即同一会话，多轮上下文由 `InMemorySaver` 维持（进程重启清空）。
+`thread_id` 相同即同一会话。对话状态落在 SQLite（`agent/data/agent.db`，`SqliteSaver`），**进程重启不丢**；会话列表另存在同库的 `sessions` 表（标题取首条提问，轮数取提问次数）。
 
 ## 测试
 
@@ -68,6 +73,7 @@ agent/
 ├── tools.py          calculator / get_current_time 两个工具
 ├── test_agent.py     冒烟测试
 ├── requirements.txt
+├── data/agent.db     对话状态 + 会话索引（SQLite，已 gitignore）
 └── .env              API Key、Base URL、模型 ID（已 gitignore）
 ```
 
@@ -75,6 +81,7 @@ deep agent 默认自带 todo 拆解、虚拟文件系统、subagent 能力，这
 
 ## 已知限制
 
-- 会话存储是内存版，重启丢失；要持久化可换 `langgraph-checkpoint-sqlite`（`SqliteSaver`）。
+- 会话存储在单机 SQLite，多实例部署需要换 Postgres / Redis checkpointer。
 - 未接真实文件系统（默认 StateBackend）；若要读写磁盘，用 `backend=FilesystemBackend(root_dir=...)`，Windows 下需注意 shell 能力受限，工具实现走纯 Python。
 - 未启用人工审批（`interrupt_on`），有副作用工具上线前建议打开。
+- 会话归属依赖前端传的 `user_id`，未做服务端鉴权（本地单用户场景够用，对外开放前需补）。
