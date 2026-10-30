@@ -34,6 +34,7 @@ export interface RoleListResponse {
 
 /** 可用页面列表 */
 export const AVAILABLE_PAGES = [
+  { key: "agent", label: "AI 助手" },
   { key: "dashboard", label: "数据仪表盘" },
   { key: "leads", label: "线索管理" },
   { key: "products", label: "商品管理" },

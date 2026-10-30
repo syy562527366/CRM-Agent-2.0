@@ -66,7 +66,7 @@ export default function CommunicationsDashboard() {
     setPage(1);
   };
 
-  const roleTagStyle: React.CSSProperties = (role: string) => ({
+  const roleTagStyle = (role: string): React.CSSProperties => ({
     display: "inline-block",
     padding: "2px 8px",
     borderRadius: 6,

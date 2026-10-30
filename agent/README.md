@@ -44,6 +44,10 @@ cd agent && ./.venv/Scripts/python.exe app.py
 | POST | `/chat/stream` | SSE 流式，逐节点推送 model / tools 执行过程 |
 | GET | `/threads/{thread_id}` | 查看某会话完整消息历史 |
 
+`/chat/stream` 同时订阅 `messages`（逐 token 增量）与 `updates`（节点快照），事件类型为 `token` / `ai` / `tool` / `error`，前端可直接做打字机渲染。
+
+CRM 前端「AI 助手」页（`/agent`）通过 Next rewrite `/agent-api/*` 代理到本服务，无需额外配置 CORS。
+
 `thread_id` 相同即同一会话，多轮上下文由 `InMemorySaver` 维持（进程重启清空）。
 
 ## 测试

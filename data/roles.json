@@ -5,6 +5,14 @@
     "name": "管理员",
     "permissions": [
       {
+        "pageKey": "agent",
+        "pageLabel": "AI 助手",
+        "functions": [
+          "查看"
+        ],
+        "dataScope": "全部"
+      },
+      {
         "pageKey": "dashboard",
         "pageLabel": "数据仪表盘",
         "functions": [
@@ -85,6 +93,14 @@
     "createdAt": "2026-06-01 00:00",
     "name": "销售",
     "permissions": [
+      {
+        "pageKey": "agent",
+        "pageLabel": "AI 助手",
+        "functions": [
+          "查看"
+        ],
+        "dataScope": "全部"
+      },
       {
         "pageKey": "dashboard",
         "pageLabel": "数据仪表盘",

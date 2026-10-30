@@ -185,27 +185,48 @@ def chat(req: ChatRequest) -> dict[str, Any]:
 
 @app.post("/chat/stream")
 def chat_stream(req: ChatRequest) -> StreamingResponse:
+    def sse(event: dict[str, Any]) -> str:
+        return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
     def event_source() -> Iterator[str]:
         try:
             agent = get_agent()
-            for chunk in agent.stream(
+            # 同时订阅两种流：
+            #   messages → 逐 token 增量，前端可像打字机一样渲染
+            #   updates  → 节点级快照，用于拿工具调用与最终文本
+            for mode, chunk in agent.stream(
                 {"messages": [HumanMessage(content=req.message)]},
                 config=_config(req.thread_id),
-                stream_mode="updates",
+                stream_mode=["messages", "updates"],
             ):
+                if mode == "messages":
+                    token, metadata = chunk
+                    text = _text_of(token)
+                    if text:
+                        yield sse(
+                            {
+                                "node": (metadata or {}).get("langgraph_node"),
+                                "type": "token",
+                                "content": text,
+                                "tool_calls": [],
+                            }
+                        )
+                    continue
+
                 for node, delta in (chunk or {}).items():
                     if not isinstance(delta, dict):
                         continue
                     for message in delta.get("messages", []) or []:
                         if not isinstance(message, BaseMessage):
                             continue
-                        event = {
-                            "node": node,
-                            "type": message.type,
-                            "content": _text_of(message),
-                            "tool_calls": _tool_calls_of(message),
-                        }
-                        yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                        yield sse(
+                            {
+                                "node": node,
+                                "type": message.type,
+                                "content": _text_of(message),
+                                "tool_calls": _tool_calls_of(message),
+                            }
+                        )
             yield "data: [DONE]\n\n"
         except Exception as exc:  # noqa: BLE001 - SSE 内无法改状态码，用事件告知
             error = {"type": "error", "content": f"{exc}"}

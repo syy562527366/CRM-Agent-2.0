@@ -100,6 +100,7 @@ export default function Sidebar({ activeItem }: SidebarProps) {
 
   // 根据角色权限过滤导航项
   const visibleNavItems = navItems.filter((item) => canAccessPage(role, item.key));
+  const canUseAgent = canAccessPage(role, "agent");
 
   return (
     <aside className="w-60 min-w-60 bg-[#0F172A] flex flex-col h-screen sticky top-0 overflow-y-auto">
@@ -118,6 +119,33 @@ export default function Sidebar({ activeItem }: SidebarProps) {
 
       {/* Navigation */}
       <nav className="px-3 py-3 flex-1">
+        {canUseAgent && (
+          <>
+            <div className="text-[11px] font-semibold text-slate-600 uppercase tracking-widest px-3 pb-1.5 pt-1">
+              智能助手
+            </div>
+            <Link
+              href="/agent"
+              className={`flex items-center gap-3 px-3.5 py-2.5 rounded-lg text-sm font-medium transition-all duration-150 cursor-pointer mb-0.5 relative ${
+                activeItem === "agent"
+                  ? "bg-blue-500/15 text-blue-400 before:absolute before:left-[-12px] before:top-1/2 before:-translate-y-1/2 before:w-[3px] before:h-5 before:bg-blue-500 before:rounded-r"
+                  : "text-slate-500 hover:bg-white/5 hover:text-slate-300"
+              }`}
+            >
+              <span className={`w-5 h-5 shrink-0 ${activeItem === "agent" ? "opacity-100" : "opacity-80"}`}>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 9.9 9.9 0 0 1-4-.8L3 21l1.9-4.6a8.4 8.4 0 0 1-.9-3.9 8.4 8.4 0 0 1 8.5-8.4 8.4 8.4 0 0 1 8.5 7.4z" />
+                  <path d="M12 8.2l.9 2.4 2.4.9-2.4.9-.9 2.4-.9-2.4-2.4-.9 2.4-.9.9-2.4z" />
+                </svg>
+              </span>
+              <span>AI 助手</span>
+              <span className="ml-auto text-[10px] font-bold text-blue-400/90 bg-blue-500/15 border border-blue-400/25 rounded px-1.5 py-px">
+                AI
+              </span>
+            </Link>
+          </>
+        )}
+
         <div className="text-[11px] font-semibold text-slate-600 uppercase tracking-widest px-3 pb-1.5 pt-4">
           业务管理
         </div>
