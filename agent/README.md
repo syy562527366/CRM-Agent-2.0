@@ -1,0 +1,76 @@
+# DeepAgent 服务（deepagents + DeepSeek）
+
+基于 [langchain-ai/deepagents](https://github.com/langchain-ai/deepagents) 的最小可用 Agent 服务，模型走 DeepSeek 的 OpenAI 兼容接口（`langchain-deepseek`）。
+
+## 环境
+
+| 项 | 值 |
+|---|---|
+| Python | 3.13.12（项目内 venv：`agent/.venv`） |
+| deepagents | 0.7.32（官方 PyPI 包，未拉 375MB 的整仓源码，也不需要 deepagents-code） |
+| langchain / langgraph | 1.4.7 / 1.2.18 |
+| langchain-deepseek | 1.1.1 |
+| 服务端口 | 3200 |
+
+## 模型名说明（重要）
+
+DeepSeek 平台控制台显示名是 **DeepSeek-V4.1-Flash**，但接口只认模型 ID：
+
+- ✅ `deepseek-flash` = DeepSeek-V4.1-Flash（本项目使用）
+- ✅ `deepseek-v4-pro` = DeepSeek-V4-Pro
+- ❌ `deepseek-v4.1-flash` → 服务端返回 `invalid_request_error: The supported API model names are deepseek-flash, deepseek-v4-pro`
+
+模型 ID 配在 `agent/.env` 的 `DEEPSEEK_MODEL`，改这里即可切换。
+
+## 启动
+
+```bash
+# 依赖（首次）
+agent/.venv/Scripts/python.exe -m pip install -r agent/requirements.txt \
+  -i https://mirrors.aliyun.com/pypi/simple/
+
+# 启动服务
+cd agent && ./.venv/Scripts/python.exe app.py
+# 等价写法：agent/.venv/Scripts/python.exe -m uvicorn app:app --app-dir agent --port 3200
+```
+
+## 接口
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/health` | 健康检查，返回模型 ID 与工具列表 |
+| GET | `/tools` | 已注册工具 |
+| POST | `/chat` | 同步对话：`{"message": "...", "thread_id": "demo"}` |
+| POST | `/chat/stream` | SSE 流式，逐节点推送 model / tools 执行过程 |
+| GET | `/threads/{thread_id}` | 查看某会话完整消息历史 |
+
+`thread_id` 相同即同一会话，多轮上下文由 `InMemorySaver` 维持（进程重启清空）。
+
+## 测试
+
+服务启动后：
+
+```bash
+agent/.venv/Scripts/python.exe agent/test_agent.py
+```
+
+覆盖 5 项：健康检查、基础问答、calculator 工具调用、多轮记忆、会话历史。当前结果 5/5 通过，约 5 秒。
+
+## 结构
+
+```
+agent/
+├── app.py            FastAPI 服务 + deep agent 构建（create_deep_agent）
+├── tools.py          calculator / get_current_time 两个工具
+├── test_agent.py     冒烟测试
+├── requirements.txt
+└── .env              API Key、Base URL、模型 ID（已 gitignore）
+```
+
+deep agent 默认自带 todo 拆解、虚拟文件系统、subagent 能力，这里没有再额外叠加 middleware。
+
+## 已知限制
+
+- 会话存储是内存版，重启丢失；要持久化可换 `langgraph-checkpoint-sqlite`（`SqliteSaver`）。
+- 未接真实文件系统（默认 StateBackend）；若要读写磁盘，用 `backend=FilesystemBackend(root_dir=...)`，Windows 下需注意 shell 能力受限，工具实现走纯 Python。
+- 未启用人工审批（`interrupt_on`），有副作用工具上线前建议打开。

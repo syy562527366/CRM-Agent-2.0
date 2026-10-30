@@ -5,3 +5,11 @@ build/
 *.tsbuildinfo
 .DS_Store
 npm-debug.log*
+
+# Python Agent 服务
+agent/.venv/
+__pycache__/
+*.pyc
+agent/.env
+.env
+
