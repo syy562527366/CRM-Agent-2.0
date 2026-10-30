@@ -13,3 +13,6 @@ __pycache__/
 agent/.env
 .env
 
+# WorkBuddy 工作区元数据
+.workbuddy/
+
