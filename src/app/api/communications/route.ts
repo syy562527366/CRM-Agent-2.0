@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import type { Communication, CommunicationQuery } from "@/types/communication";
-import { readCommunications } from "./utils";
+import type { CommunicationQuery } from "@/types/communication";
+import { authorize } from "@/lib/auth/session";
+import { searchCommunications } from "@/lib/crm/communications";
+import { leadIdsOfAssignee } from "@/lib/crm/leads";
+import { isOwnOnly } from "@/lib/crm/scope";
+import { paginate } from "@/lib/crm/store";
 
 /**
  * GET /api/communications - 获取沟通记录列表（支持筛选）
@@ -15,42 +19,35 @@ import { readCommunications } from "./utils";
  *   pageSize   - 每页条数（默认 10）
  */
 export async function GET(request: NextRequest) {
+  const auth = authorize(request, "communications", "查看");
+  if (!auth.ok) return auth.response;
+
   const { searchParams } = new URL(request.url);
 
-  const all = readCommunications();
+  // 数据范围「仅自己」时，只返回本人负责线索下的沟通记录
+  const ownLeadIds = isOwnOnly(auth.scope, "communications") || isOwnOnly(auth.scope, "leads")
+    ? leadIdsOfAssignee(auth.scope.name)
+    : undefined;
 
-  const query: CommunicationQuery = {
+  const rows = searchCommunications({
     leadId: searchParams.get("leadId") ?? undefined,
+    leadIds: ownLeadIds,
     senderRole: (searchParams.get("senderRole") as CommunicationQuery["senderRole"]) ?? "",
     channel: searchParams.get("channel") ?? undefined,
     startDate: searchParams.get("startDate") ?? undefined,
     endDate: searchParams.get("endDate") ?? undefined,
-  };
+  });
 
-  let filtered = all;
+  const paged = paginate(
+    rows,
+    Number(searchParams.get("page") ?? 1),
+    Number(searchParams.get("pageSize") ?? 10)
+  );
 
-  if (query.leadId) {
-    filtered = filtered.filter((c) => c.leadId === query.leadId);
-  }
-  if (query.senderRole) {
-    filtered = filtered.filter((c) => c.senderRole === query.senderRole);
-  }
-  if (query.channel) {
-    const kw = query.channel.trim();
-    filtered = filtered.filter((c) => c.channel === kw);
-  }
-  if (query.startDate) {
-    filtered = filtered.filter((c) => c.sentAt.split(" ")[0] >= query.startDate!);
-  }
-  if (query.endDate) {
-    filtered = filtered.filter((c) => c.sentAt.split(" ")[0] <= query.endDate!);
-  }
-
-  const page = Math.max(1, parseInt(searchParams.get("page") ?? "1", 10));
-  const pageSize = Math.max(1, parseInt(searchParams.get("pageSize") ?? "10", 10));
-  const total = filtered.length;
-  const start = (page - 1) * pageSize;
-  const paged = filtered.slice(start, start + pageSize);
-
-  return NextResponse.json({ data: paged, total, page, pageSize });
+  return NextResponse.json({
+    data: paged.rows,
+    total: paged.total,
+    page: paged.page,
+    pageSize: paged.pageSize,
+  });
 }

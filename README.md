@@ -14,13 +14,15 @@
 ## 技术栈
 
 - Next.js 16.2.9（Turbopack）+ React 19.2 + Tailwind 4 + chart.js
-- 数据层：JSON 文件存储（`data/*.json`），Next.js API Routes 读写
-- **无后端服务**，单进程运行
+- 数据层：JSON 文件存储（`data/*.json`），访问逻辑集中在 `src/lib/crm/*`（API 路由与 Agent 共用）
+- 鉴权：HMAC-SHA256 签名会话 + HttpOnly Cookie，`src/lib/auth/session.ts`
+- **无外部后端服务**，单进程运行
 
 ## 快速启动
 
 ```bash
 npm install
+cp .env.example .env.local   # 生产环境请替换 CRM_SESSION_SECRET
 npm run dev        # http://127.0.0.1:3100
 ```
 
@@ -43,10 +45,20 @@ src/app/           页面路由（agent/dashboard/leads/products/orders/accounts
 src/app/api/       API 路由（auth/accounts/leads/orders/products/roles/communications）
 src/components/    业务组件（AgentChat 为 AI 助手对话界面，SessionPanel 为会话管理栏，chat/ 为对话原子组件）
 src/hooks/         usePermission 权限判断
+src/lib/crm/       数据访问层（JSON 读写、检索、按数据范围过滤）—— API 与 Agent 的唯一数据出口
+src/lib/auth/      会话签名（HMAC-SHA256）与鉴权助手
 src/types/         类型定义
 data/              JSON 数据文件（业务数据 + 账号 + 角色 + 销售目标）
 agent/             DeepAgents + DeepSeek 的 Python Agent 服务（独立 venv）
 ```
+
+## 鉴权与数据权限
+
+- 登录成功后服务端签发 HMAC 签名的会话 token，同时写入 **HttpOnly Cookie**（12 小时有效）。前端 fetch 无需任何改造，浏览器自动携带。
+- 每个 API 路由在入口调用 `authorize(request, pageKey, action)`，依次校验：会话有效 → 账号存在 → 角色具备该页面的对应功能权限；无权限返回 `403`，未登录返回 `401`。
+- 数据范围「仅自己」在数据层强制注入过滤条件（线索按 `assignee === 当前账号姓名`，沟通记录按本人线索 ID），工具与路由都无法绕过。
+- `GET /api/auth/session` 返回当前账号与最新角色权限，前端启动时用它校验会话并同步权限；会话失效会自动退回登录页。
+- 修改密码只允许改自己的（管理员另需「账号 · 修改」权限），且始终校验原密码。
 
 ## 数据文件
 

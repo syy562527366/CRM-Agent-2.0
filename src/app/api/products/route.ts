@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import type { Product, ProductQuery, CreateProductRequest } from "@/types/product";
-import { readProducts, writeProducts, generateProductId } from "./utils";
+import type { CreateProductRequest } from "@/types/product";
+import { authorize } from "@/lib/auth/session";
+import { createProduct, searchProducts } from "@/lib/crm/products";
+import { paginate } from "@/lib/crm/store";
 
 /**
  * GET /api/products - 获取商品列表（支持筛选）
@@ -14,74 +16,49 @@ import { readProducts, writeProducts, generateProductId } from "./utils";
  *   pageSize   - 每页条数（默认 5）
  */
 export async function GET(request: NextRequest) {
+  const auth = authorize(request, "products", "查看");
+  if (!auth.ok) return auth.response;
+
   const { searchParams } = new URL(request.url);
 
-  const allProducts = readProducts();
-
-  // --- 筛选 ---
-  const query: ProductQuery = {
+  const rows = searchProducts({
     startDate: searchParams.get("startDate") ?? undefined,
     endDate: searchParams.get("endDate") ?? undefined,
     productNo: searchParams.get("productNo") ?? undefined,
     name: searchParams.get("name") ?? undefined,
-  };
+  });
 
-  let filtered = allProducts;
+  const paged = paginate(rows, Number(searchParams.get("page") ?? 1), Number(searchParams.get("pageSize") ?? 5));
 
-  if (query.startDate) {
-    filtered = filtered.filter((p) => p.createdAt.split(" ")[0] >= query.startDate!);
-  }
-  if (query.endDate) {
-    filtered = filtered.filter((p) => p.createdAt.split(" ")[0] <= query.endDate!);
-  }
-  if (query.productNo) {
-    const kw = query.productNo.trim();
-    filtered = filtered.filter((p) => p.productNo.includes(kw) || p.id.includes(kw));
-  }
-  if (query.name) {
-    const kw = query.name.trim();
-    filtered = filtered.filter((p) => p.name.includes(kw));
-  }
-
-  // --- 分页 ---
-  const page = Math.max(1, parseInt(searchParams.get("page") ?? "1", 10));
-  const pageSize = Math.max(1, parseInt(searchParams.get("pageSize") ?? "5", 10));
-  const total = filtered.length;
-  const start = (page - 1) * pageSize;
-  const paged = filtered.slice(start, start + pageSize);
-
-  return NextResponse.json({ data: paged, total, page, pageSize });
+  return NextResponse.json({
+    data: paged.rows,
+    total: paged.total,
+    page: paged.page,
+    pageSize: paged.pageSize,
+  });
 }
 
 /**
  * POST /api/products - 新增商品
  */
 export async function POST(request: NextRequest) {
+  const auth = authorize(request, "products", "增加");
+  if (!auth.ok) return auth.response;
+
   try {
     const body: CreateProductRequest = await request.json();
 
-    // 校验必填字段
     if (!body.productNo || !body.name || body.price == null) {
       return NextResponse.json({ error: "请填写完整商品信息" }, { status: 400 });
     }
 
-    const allProducts = readProducts();
-
-    const now = new Date();
-    const dateStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-
-    const newProduct: Product = {
-      id: generateProductId(allProducts),
-      createdAt: dateStr,
-      productNo: body.productNo.trim(),
-      name: body.name.trim(),
+    const product = createProduct({
+      productNo: body.productNo,
+      name: body.name,
       price: body.price,
-    };
+    });
 
-    allProducts.unshift(newProduct);
-    writeProducts(allProducts);
-
-    return NextResponse.json(newProduct, { status: 201 });
+    return NextResponse.json(product, { status: 201 });
   } catch {
     return NextResponse.json({ error: "请求数据格式错误" }, { status: 400 });
   }

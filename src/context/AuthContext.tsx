@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
 import type { PermissionItem } from "@/types/role";
 
 export interface AuthUser {
@@ -31,6 +31,8 @@ interface AuthState {
 const AuthContext = createContext<AuthState | undefined>(undefined);
 
 const STORAGE_KEY = "crm_auth";
+/** 会话本体是 HttpOnly Cookie，前端拿不到，这里只存一个标记用于渲染判断 */
+const COOKIE_SESSION = "cookie-session";
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
@@ -38,38 +40,53 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [token, setToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // 页面加载时恢复登录状态，并同步最新角色权限
+  const logout = useCallback(() => {
+    setUser(null);
+    setRole(null);
+    setToken(null);
+    localStorage.removeItem(STORAGE_KEY);
+    // 清除服务端 HttpOnly 会话 Cookie（失败也不影响本地登出）
+    void fetch("/api/auth/logout", { method: "POST" }).catch(() => undefined);
+  }, []);
+
+  /**
+   * 页面加载时恢复登录状态。
+   *
+   * 先读 localStorage 避免白屏，再用 /api/auth/session 以服务端为准校验：
+   * - 200：同步最新的账号信息与角色权限（管理员改过权限后刷新即生效）
+   * - 401：Cookie 过期或token 无效 → 直接登出
+   */
   useEffect(() => {
     (async () => {
       try {
         const stored = localStorage.getItem(STORAGE_KEY);
-        if (stored) {
-          const parsed = JSON.parse(stored);
-          setUser(parsed.user);
-          setRole(parsed.role);
-          setToken(parsed.token);
+        const cached = stored ? JSON.parse(stored) : null;
+        if (cached?.user) {
+          setUser(cached.user);
+          setRole(cached.role);
+          setToken(cached.token ?? COOKIE_SESSION);
+        }
 
-          // 同步最新角色权限（管理员可能已修改权限，刷新页面后应生效）
-          try {
-            const rolesRes = await fetch("/api/roles", { cache: "no-store" });
-            if (rolesRes.ok) {
-              const rolesData = await rolesRes.json();
-              const roles = Array.isArray(rolesData) ? rolesData : rolesData?.data ?? [];
-              const latest = roles.find((r: { id: string }) => r.id === parsed.user?.roleId);
-              if (latest) {
-                setRole(latest);
-                localStorage.setItem(
-                  STORAGE_KEY,
-                  JSON.stringify({ user: parsed.user, role: latest, token: parsed.token })
-                );
-              }
-            }
-          } catch {
-            // 同步失败时保留缓存角色，不影响使用
-          }
+        const res = await fetch("/api/auth/session", { cache: "no-store" });
+        if (res.ok) {
+          const data = await res.json();
+          const nextToken = cached?.token ?? COOKIE_SESSION;
+          setUser(data.user);
+          setRole(data.role);
+          setToken(nextToken);
+          localStorage.setItem(
+            STORAGE_KEY,
+            JSON.stringify({ user: data.user, role: data.role, token: nextToken })
+          );
+        } else if (stored) {
+          // 服务端会话已失效
+          setUser(null);
+          setRole(null);
+          setToken(null);
+          localStorage.removeItem(STORAGE_KEY);
         }
       } catch {
-        // ignore
+        // 网络异常时保留缓存状态，避免误踢下线
       } finally {
         setLoading(false);
       }
@@ -103,13 +120,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } catch {
       return "网络错误，请稍后重试";
     }
-  }, []);
-
-  const logout = useCallback(() => {
-    setUser(null);
-    setRole(null);
-    setToken(null);
-    localStorage.removeItem(STORAGE_KEY);
   }, []);
 
   return (

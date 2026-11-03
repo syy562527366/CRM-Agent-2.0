@@ -1,15 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
-import { findProduct, updateProduct, deleteProduct } from "../utils";
+import { authorize } from "@/lib/auth/session";
+import { deleteProduct, findProduct, updateProduct } from "@/lib/crm/products";
 
 type Params = Promise<{ id: string }>;
 
 /**
  * GET /api/products/[id] - 获取单个商品详情
  */
-export async function GET(
-  _request: NextRequest,
-  { params }: { params: Params }
-) {
+export async function GET(request: NextRequest, { params }: { params: Params }) {
+  const auth = authorize(request, "products", "查看");
+  if (!auth.ok) return auth.response;
+
   const { id } = await params;
   const product = findProduct(id);
   if (!product) {
@@ -21,10 +22,10 @@ export async function GET(
 /**
  * PUT /api/products/[id] - 修改商品
  */
-export async function PUT(
-  request: NextRequest,
-  { params }: { params: Params }
-) {
+export async function PUT(request: NextRequest, { params }: { params: Params }) {
+  const auth = authorize(request, "products", "修改");
+  if (!auth.ok) return auth.response;
+
   const { id } = await params;
   try {
     const body = await request.json();
@@ -41,13 +42,12 @@ export async function PUT(
 /**
  * DELETE /api/products/[id] - 删除商品
  */
-export async function DELETE(
-  _request: NextRequest,
-  { params }: { params: Params }
-) {
+export async function DELETE(request: NextRequest, { params }: { params: Params }) {
+  const auth = authorize(request, "products", "删除");
+  if (!auth.ok) return auth.response;
+
   const { id } = await params;
-  const deleted = deleteProduct(id);
-  if (!deleted) {
+  if (!deleteProduct(id)) {
     return NextResponse.json({ error: "商品不存在" }, { status: 404 });
   }
   return NextResponse.json({ message: "删除成功" });
