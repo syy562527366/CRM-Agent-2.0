@@ -98,8 +98,9 @@ def dump(envelope: dict[str, Any]) -> str:
 # 客户端
 # --------------------------------------------------------------------------- #
 _ERROR_MAP = {
+    400: ("INVALID_ARGUMENT", "CRM 拒绝了这次请求：参数不合法"),
     401: ("UNAUTHORIZED", "登录状态已失效，请让用户重新登录 CRM 后再试"),
-    403: ("PERMISSION_DENIED", "当前账号没有该数据的查看权限"),
+    403: ("PERMISSION_DENIED", "当前账号没有该操作的权限（功能权限或数据范围不足）"),
     404: ("NOT_FOUND", "记录不存在，或不在当前账号的数据范围内"),
 }
 
@@ -116,13 +117,17 @@ class CrmClient:
 
     def __init__(self, ctx: CrmCtx):
         self.ctx = ctx
-        headers = {"Accept": "application/json"}
+        # Connection: close 是为了绕开 Next dev 的一个怪癖：
+        # 同一个 keep-alive 连接上第二次发非 GET 请求，dev server 会回 308
+        # 且 Location 指向同一个 URL；不复用连接就正常。CRM 调用量很小，不值得为它保留长连接。
+        headers = {"Accept": "application/json", "Connection": "close"}
         if ctx.token:
             headers["Authorization"] = f"Bearer {ctx.token}"
         self._client = httpx.Client(
             base_url=CRM_BASE_URL,
             timeout=CRM_TIMEOUT,
             headers=headers,
+            limits=httpx.Limits(max_keepalive_connections=0, max_connections=4),
         )
 
     def close(self) -> None:
@@ -136,14 +141,45 @@ class CrmClient:
 
     def get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         """成功返回 {'ok': True, 'body': {...}}，失败返回 fail(...)。"""
-        try:
-            resp = self._client.get(path, params=_clean(params))
-        except httpx.TimeoutException:
-            return fail("TIMEOUT", f"CRM 服务响应超时（>{CRM_TIMEOUT:g}s），请稍后再试")
-        except httpx.HTTPError as exc:
-            return fail("SERVICE_UNAVAILABLE", f"无法连接 CRM 服务（{CRM_BASE_URL}）：{exc}")
+        return self._send("GET", path, params=params)
 
-        if resp.status_code == 200:
+    def put(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+        return self._send("PUT", path, body=body)
+
+    def delete(self, path: str) -> dict[str, Any]:
+        return self._send("DELETE", path)
+
+    def _send(
+        self,
+        method: str,
+        path: str,
+        params: dict[str, Any] | None = None,
+        body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        resp: httpx.Response | None = None
+        # Next dev 在某个路由的某个 method 首次编译时，会先返回一次 308
+        # （Location 指向同一个 URL），原样重连一次就正常；生产构建不会出现。
+        for attempt in range(2):
+            try:
+                resp = self._client.request(
+                    method,
+                    path,
+                    params=_clean(params),
+                    json=body if body is not None else None,
+                )
+            except httpx.TimeoutException:
+                return fail("TIMEOUT", f"CRM 服务响应超时（>{CRM_TIMEOUT:g}s），请稍后再试")
+            except httpx.HTTPError as exc:
+                return fail("SERVICE_UNAVAILABLE", f"无法连接 CRM 服务（{CRM_BASE_URL}）：{exc}")
+
+            if resp.status_code in (307, 308) and attempt == 0:
+                continue
+            break
+
+        if resp is None:  # pragma: no cover - 循环至少执行一次
+            return fail("SERVICE_UNAVAILABLE", "CRM 服务无响应")
+
+        if resp.status_code in (200, 201):
             try:
                 return {"ok": True, "body": resp.json()}
             except ValueError:

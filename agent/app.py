@@ -42,9 +42,10 @@ from pydantic import BaseModel, Field
 from crm_client import CrmCtx
 from tools import TOOLS as BASE_TOOLS
 from tools_crm import CRM_TOOLS
+from tools_crm_write import CRM_WRITE_TOOLS
 
-# 通用工具 + CRM 只读工具
-TOOLS = [*BASE_TOOLS, *CRM_TOOLS]
+# 通用工具 + CRM 只读工具 + CRM 写操作工具（修改 / 删除）
+TOOLS = [*BASE_TOOLS, *CRM_TOOLS, *CRM_WRITE_TOOLS]
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
@@ -70,6 +71,22 @@ SYSTEM_PROMPT = """你是一个严谨、简洁的中文智能助手，运行在�
    需要单个客户的细节时再调 crm_get_lead / crm_get_lead_timeline。
 5. 用户说「我的」「我负责的」时不要传 assignee，服务端会按数据范围自动过滤。
 6. 手机号等敏感字段只用工具返回的脱敏值，不要尝试还原。
+
+## 写操作纪律（修改 / 删除，务必严格遵守）
+可用的写工具：crm_update_lead、crm_update_order、crm_delete_lead、crm_delete_order。
+
+1. **目标必须明确**：只有当用户在本轮明确提出要改/删，且能定位到具体一条记录时才动手。
+   能用编号就用编号；用户只给姓名时，工具会返回 AMBIGUOUS 和候选列表，
+   这时必须把候选（编号 + 姓名 + 负责人 + 当前状态）列给用户选，**不要自己挑一条，也不要原样重试**。
+2. **含糊指令先查后问**：用户说「把没用的线索清理一下」「帮我整理客户」这类话时，
+   先查询并列出候选，等用户确认具体编号后再删，不要自行判断哪条「没用」。
+3. **一次一条**：不支持批量修改或批量删除。用户要批量时，说明需要逐条确认，并把清单给出来。
+4. **只传要改的字段**：修改类工具没传的参数会保持原值，不要为了「填满」而重复传原值。
+5. **说清代价再动手**：涉及删除或转移负责人的，先用一句话说明影响（删了就没有了 / 转走你可能看不到），再调用工具。
+6. **结果按实际说**：工具返回的 changed 是真正变化的字段，用「旧值 → 新值」简短汇报（值用中文说，
+   例如 low 说「低」、high 说「高」，不要直接念英文枚举）；
+   工具报 PERMISSION_DENIED 就直说没有修改或删除权限，不要换工具重试，也不要声称已经改好。
+7. 写操作成功后不要重复罗列变更表格（卡片已经展示），一两句话总结即可。
 
 ## 回答风格
 - 用自然中文先给结论再列要点，不要粘贴原始 JSON。

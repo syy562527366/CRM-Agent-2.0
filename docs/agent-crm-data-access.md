@@ -8,7 +8,8 @@
 - [x] **第一步（已完成，2026-11-03）**：抽取 `src/lib/crm/*` 数据访问层；补上服务端会话鉴权与功能/数据范围校验；6 个旧 `api/*/utils.ts` 已删除，13 个路由改为调用数据层。
 - [x] **第二步 · CRM 侧（已完成，2026-11-03）**：`/agent-api/*` 改 Route Handler，鉴权后注入 `x-crm-*` 身份头；新增 `/api/stats` 聚合接口；前端 `tool_data` 表格卡片就绪。见「十一」。
 - [x] **第二步 · Agent 侧（已完成，2026-11-03）**：`crm_client.py` + `tools_crm.py`（7 个只读工具）接入，工具全部走 CRM HTTP API；`app.py` 解析 `x-crm-context` 注入 `configurable.crm_ctx`；`crm_read_leads` 已删除；`tool_data` 事件接通。冒烟测试 7/7。
-- [ ] 第三步：审计日志 `agent_audit`、工具级缓存、写操作审批。
+- [x] **写操作（已完成，2026-11-03）**：`tools_crm_write.py` 新增 4 个工具 —— `crm_update_lead`、`crm_update_order`、`crm_delete_lead`、`crm_delete_order`。字段白名单、先读后写生 diff、删除留底 `data/trash.jsonl`、全量写操作审计 `data/audit.jsonl`；前端新增「变更明细 / 已删除记录」卡片。测试 28/28。
+- [ ] 第三步：工具级缓存、写操作 `interrupt_on` 人工审批、`tool_data` 卡片持久化。
 
 现状与目标之间仍存在的能力缺口，见下文「七、改造清单」。
 
@@ -168,10 +169,15 @@ def crm_search_leads(..., user: Annotated[CrmCtx, InjectedToolArg]) -> str
 `phone / email / idCard` 默认不出现在任何工具返回值里。需要手机号时用独立工具 `crm_get_lead_contact(id)`，
 校验「查看」权限 + 记录审计，返回脱敏值（`138****5678`），完整值仅管理员可见。
 
-### 决策 6：读默认，写必审
+### 决策 6：读默认，写白名单
 
-第一阶段只做只读工具。写操作（新建线索、改状态、加沟通记录）作为第二阶段，
-必须挂 `interrupt_on`（deepagents 已支持人工审批），前端弹确认条，用户批准后才执行，并写审计日志。
+第一阶段只做只读工具。写操作（第二阶段，**已落地**）没有采用「把整个 body 转发给 CRM」的做法，
+因为 CRM 的 `PUT` 是 `{...old, ...body}` 全量覆盖，直接把模型给的 JSON 透过去，模型就能改 `id`、
+`createdAt`、`communicationCount` 这类不该动的字段。
+
+实际实现：**字段白名单 + 先读后写 + 删除留底 + 全量审计**（见 `agent/tools_crm_write.py`）。
+`interrupt_on` 人工审批仍未接 —— 权限位（修改 / 删除功能位）在工具入口拦一次，CRM API 再用 Bearer 校验一次，
+加上提示词要求「删除前先说明代价」，作为当前阶段的替代。真正对外开放前应补上审批中断。
 
 ---
 
@@ -186,10 +192,12 @@ def crm_search_leads(..., user: Annotated[CrmCtx, InjectedToolArg]) -> str
 | `crm_list_products` | 无 | 商品 id / 名称 / 价格 | products.查看 |
 | `crm_lead_stats` | group_by(status/source/assignee/priority), date_from, date_to | 分组计数 | leads.查看 |
 | `crm_sales_stats` | period(month/week), group_by(product/assignee) | 成交额、订单数、客单价 | orders.查看 |
-| `crm_funnel_stats` | date_from, date_to | 各状态数量与转化率 | leads.查看 |
-| *(P2)* `crm_create_lead` | name, phone, source, priority, assignee | 新线索 id | leads.增加 + 审批 |
-| *(P2)* `crm_update_lead_status` | lead_id, status, remark | 更新后状态 | leads.修改 + 审批 |
-| *(P2)* `crm_add_communication` | lead_id, channel, content | 记录 id | communications.增加 + 审批 |
+| `crm_update_lead` ✅ | lead_id(编号或姓名), status, priority, assignee, intent_product, budget_range, customer_position, trial_duration, remark | 变化的字段（旧值 → 新值） | leads.修改 |
+| `crm_update_order` ✅ | order_key, amount | 金额变化 | orders.修改 |
+| `crm_delete_lead` ✅ | lead_id, reason | 被删记录摘要（已留底） | leads.删除 |
+| `crm_delete_order` ✅ | order_key, reason | 被删记录摘要（已留底） | orders.删除 |
+| ⬜ `crm_create_lead` | name, phone, source, priority, assignee | 新线索 id | leads.增加 |
+| ⬜ `crm_add_communication` | lead_id, channel, content | 记录 id | communications.增加（**API 尚不支持 POST，需先补**） |
 
 工具统一返回信封，便于模型稳定处理失败：
 
@@ -246,12 +254,15 @@ def crm_search_leads(..., user: Annotated[CrmCtx, InjectedToolArg]) -> str
 
 ### P1（体验）
 8. ✅ `tool_data` 事件 + 前端表格卡片（前端已就绪，Agent 侧按「十一」的格式发事件即可）。
-9. ⬜ 审计日志表 `agent_audit`（who / tool / params / rows / ts）。
+9. ✅ 写操作审计（JSONL：`agent/data/audit.jsonl`，字段 who / role / tool / action / target / changes / ok / ts）；
+   比原计划的 `agent_audit` 表更轻，日志可直读、不需要迁移。仍待做：只读查询审计。
 10. ⬜ 工具级缓存（同一 filter 30s 内复用）。
 
 ### P2（写操作）
-11. `interrupt_on` 审批 + 前端确认条。
-12. 撤销窗口（写操作记录 diff，支持 10s 内回滚）。
+11. ✅ 写工具已上线 4 个：`crm_update_lead`、`crm_update_order`、`crm_delete_lead`、`crm_delete_order`；
+    字段白名单、先读后写生 diff、删除留底 `agent/data/trash.jsonl`。
+    ⬜ 仍缺 `interrupt_on` 审批与前端确认条 —— 目前靠「权限位 + 提示词要求先说明代价」约束。
+12. ⬜ 撤销窗口（写操作记录 diff，支持 10s 内回滚）。删除留底已具备回捞基础。
 
 ---
 

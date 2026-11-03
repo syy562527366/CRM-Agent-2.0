@@ -53,6 +53,9 @@ const COLUMN_LABEL: Record<string, string> = {
   content: "内容",
   sender: "发送人",
   avgAmount: "客单价",
+  field: "字段",
+  before: "原值",
+  after: "新值",
 };
 
 const KIND_TITLE: Record<string, string> = {
@@ -60,6 +63,8 @@ const KIND_TITLE: Record<string, string> = {
   order_table: "订单明细",
   stat_table: "统计结果",
   communication_table: "沟通记录",
+  change_table: "变更明细",
+  delete_table: "已删除的记录",
 };
 
 const STATUS_COLOR: Record<string, { bg: string; color: string }> = {
@@ -102,6 +107,12 @@ function renderCell(value: unknown, key: string) {
     const label = { high: "高", medium: "中", low: "低" }[value] ?? value;
     return <Chip style={style}>{label}</Chip>;
   }
+  // 变更卡片（字段 / 原值 / 新值）里也会出现 low / high，同样转成中文
+  if ((key === "before" || key === "after") && typeof value === "string" && PRIORITY_COLOR[value]) {
+    const style = PRIORITY_COLOR[value];
+    const label = { high: "高", medium: "中", low: "低" }[value] ?? value;
+    return <Chip style={style}>{label}</Chip>;
+  }
   if (typeof value === "number") return value.toLocaleString("zh-CN");
 
   return String(value);
@@ -131,8 +142,8 @@ export default function DataTableCard({ data }: { data: DataTableCardData }) {
   const rows = (data.rows ?? []).slice(0, MAX_ROWS);
   const total = data.total ?? data.rows?.length ?? 0;
   const title = data.title || (data.kind ? KIND_TITLE[data.kind] : "") || "查询结果";
-  // 统计类卡片数的是「组」，明细类数的是「条」
-  const unit = data.kind === "stat_table" ? "组" : "条";
+  // 统计类卡片数的是「组」，变更类数的是「项」，明细类数的是「条」
+  const unit = data.kind === "stat_table" ? "组" : data.kind === "change_table" ? "项" : "条";
 
   if (!columns.length) return null;
 
