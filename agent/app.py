@@ -6,6 +6,7 @@
 接口：
     GET    /health             健康检查（含模型信息）
     GET    /tools              已注册工具列表
+    GET    /whoami             回显调用者身份（排查 x-crm-* 头是否透传）
     GET    /sessions           会话列表（按最近活跃时间倒序）
     POST   /sessions           新建会话
     PATCH  /sessions/{id}      重命名会话
@@ -17,6 +18,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import sqlite3
@@ -27,7 +29,7 @@ from functools import lru_cache
 from typing import Any, Iterator
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_deepseek import ChatDeepSeek
@@ -376,6 +378,34 @@ def list_tools() -> dict[str, Any]:
             {"name": tool.name, "description": (tool.description or "").strip().split("\n")[0]}
             for tool in TOOLS
         ]
+    }
+
+
+@app.get("/whoami")
+def whoami(
+    x_crm_user: str = Header(default=""),
+    x_crm_token: str = Header(default=""),
+    x_crm_context: str = Header(default=""),
+) -> dict[str, Any]:
+    """回显当前调用者身份（Next 代理注入的 x-crm-* 头）。
+
+    不给模型用，只用于排查「身份是否真的传到了 Agent 侧」。
+    """
+    ctx: dict[str, Any] = {}
+    if x_crm_context:
+        padded = x_crm_context + "=" * (-len(x_crm_context) % 4)
+        try:
+            ctx = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail=f"x-crm-context 解码失败：{exc}") from exc
+
+    return {
+        "user": x_crm_user,
+        "name": ctx.get("name"),
+        "role_name": ctx.get("roleName"),
+        "permissions": ctx.get("permissions", []),
+        "has_token": bool(x_crm_token),
+        "token_length": len(x_crm_token),
     }
 
 

@@ -6,8 +6,9 @@
 ## 进度
 
 - [x] **第一步（已完成，2026-11-03）**：抽取 `src/lib/crm/*` 数据访问层；补上服务端会话鉴权与功能/数据范围校验；6 个旧 `api/*/utils.ts` 已删除，13 个路由改为调用数据层。
-- [ ] 第二步：Next 代理层注入身份 → Agent 用 `RunnableConfig` 接收 → 只读工具接入。
-- [ ] 第三步：`tool_data` 事件 + 前端表格卡片 + 审计日志。
+- [x] **第二步 · CRM 侧（已完成，2026-11-03）**：`/agent-api/*` 改 Route Handler，鉴权后注入 `x-crm-*` 身份头；新增 `/api/stats` 聚合接口；前端 `tool_data` 表格卡片就绪。见「十一」。
+- [ ] **第二步 · Agent 侧（待做）**：`agent/crm_client.py`、`agent/tools_crm.py` 六个只读工具、`app.py` 读取 `x-crm-context` 注入 `configurable.crm_ctx`、system prompt。
+- [ ] 第三步：`tool_data` 事件接线 + 审计日志。
 
 现状与目标之间仍存在的能力缺口，见下文「七、改造清单」。
 
@@ -234,19 +235,19 @@ def crm_search_leads(..., user: Annotated[CrmCtx, InjectedToolArg]) -> str
 ## 七、改造清单
 
 ### P0（可用，1~2 天）
-1. `src/lib/crm/{leads,orders,products,communications,stats}.ts` —— 抽数据访问层，`/api/*` 改调用它。
-2. `src/app/api/agent-proxy/[...path]/route.ts` —— 用 Route Handler 替代 `next.config.ts` 的 rewrite，
-   在服务端注入 `X-CRM-User`（从 `crm_auth` cookie 或 header 解析）。
-3. `agent/crm_client.py` —— 封装对 CRM API 的调用（httpx，超时 5s，统一错误映射）。
-4. `agent/tools_crm.py` —— 实现只读工具 6 个（search/get/timeline/orders/products/stats）。
-5. `agent/app.py` —— 解析身份 → 注入 `configurable.crm_ctx`；`ChatRequest` 去掉 `user_id`（改为服务端解析）。
-6. 系统提示词补充：查询必须先调工具、无数据就说没有、`PERMISSION_DENIED` 不得绕过。
+1. ✅ `src/lib/crm/{leads,orders,products,communications,stats}.ts` —— 数据访问层，`/api/*` 改调用它。
+2. ✅ `src/app/agent-api/[...path]/route.ts` —— Route Handler 替代 `next.config.ts` 的 rewrite，
+   在服务端注入 `x-crm-*` 身份头（见「十一」）。
+3. ⬜ `agent/crm_client.py` —— 封装对 CRM API 的调用（httpx，超时 5s，统一错误映射）。
+4. ⬜ `agent/tools_crm.py` —— 实现只读工具 6 个（search/get/timeline/orders/products/stats）。
+5. ⬜ `agent/app.py` —— 解析 `x-crm-context` → 注入 `configurable.crm_ctx`；`ChatRequest` 去掉 `user_id`。
+6. ⬜ 系统提示词补充：查询必须先调工具、无数据就说没有、`PERMISSION_DENIED` 不得绕过。
+7. ✅ `GET /api/stats` —— 线索分组计数与销售统计，数据范围在 service 层强制执行。
 
 ### P1（体验）
-7. `tool_data` 事件 + 前端表格卡片。
-8. `crm_lead_stats` / `crm_sales_stats` 聚合（在 service 层算，不要拉全量到 Python）。
-9. 审计日志表 `agent_audit`（who / tool / params / rows / ts）。
-10. 工具级缓存（同一 filter 30s 内复用）。
+8. ✅ `tool_data` 事件 + 前端表格卡片（前端已就绪，Agent 侧按「十一」的格式发事件即可）。
+9. ⬜ 审计日志表 `agent_audit`（who / tool / params / rows / ts）。
+10. ⬜ 工具级缓存（同一 filter 30s 内复用）。
 
 ### P2（写操作）
 11. `interrupt_on` 审批 + 前端确认条。
@@ -285,3 +286,73 @@ def crm_search_leads(..., user: Annotated[CrmCtx, InjectedToolArg]) -> str
 
 **先补认证、再抽 service 层、最后让 Agent 以「受控身份 + 窄工具」调 CRM API**；
 不要在现有 `crm_read_leads` 上继续加参数——它直读文件的设计，每加一个域都会多一处权限缺口。
+
+---
+
+## 十一、给 Agent 侧的实现约定（CRM 侧已就绪，2026-11-03）
+
+### 11.1 代理注入的请求头
+
+`/agent-api/*` 由 `src/app/agent-api/[...path]/route.ts` 处理：
+
+- 未登录 → 直接 `401`，请求**不会**转发到 3200；
+- 已登录 → 转发并附加三个头（服务端写入，浏览器与模型都改不了）：
+
+| 头 | 内容 |
+|---|---|
+| `x-crm-user` | 账号 ID，如 `ACCT-2026-0002` |
+| `x-crm-token` | 签名会话 token，可直接用作 `Authorization: Bearer <token>` 调 CRM 接口 |
+| `x-crm-context` | `base64url(JSON)`：`{uid, name, roleId, roleName, permissions[]}` |
+
+```python
+import base64, json
+
+def parse_ctx(raw: str) -> dict:
+    padded = raw + "=" * (-len(raw) % 4)
+    return json.loads(base64.urlsafe_b64decode(padded))
+```
+
+代理还会强制覆盖身份，避免前端伪造：`GET /sessions` 的 `user_id` 查询参数、以及请求体里的 `user_id`，
+一律替换为当前登录账号 ID（已实测：前端传 `hacker`，落库仍是 `ACCT-2026-0002`）。
+
+### 11.2 自检接口
+
+`GET /agent-api/whoami` → 回显解析后的身份，确认头真的传到了：
+
+```json
+{"user":"ACCT-2026-0002","name":"张明","role_name":"销售",
+ "permissions":[{"pageKey":"leads","functions":["查看","修改","增加"],"dataScope":"全部"}],
+ "has_token":true,"token_length":130}
+```
+
+### 11.3 统计接口（新增，替代在 Python 里算）
+
+```http
+GET /api/stats?domain=leads&groupBy=status&startDate=&endDate=
+GET /api/stats?domain=sales&groupBy=product&startDate=&endDate=
+```
+
+- `domain=leads` 需 `leads.查看`，`groupBy` ∈ `status / source / assignee / priority`；
+- `domain=sales` 需 `orders.查看`，`groupBy` ∈ `product / assignee / month`；
+- 返回 `{domain, groupBy, total, amount?, groups:[{key,count,amount?,avgAmount?}], dataScope}`。
+
+`sales` 的「仅自己」按「本人负责线索的手机号」过滤订单，因为订单表本身没有负责人字段。
+实测：销售（仅自己）6 条线索 / 7 笔订单 27840 元，管理员 35 条 / 27 笔 83360 元。
+
+### 11.4 `tool_data` 事件格式
+
+工具明细由 Agent 侧在 SSE 里单独发一条，前端已支持，**不会进入模型上下文**：
+
+```json
+{"type":"tool_data","tool":"crm_search_leads","kind":"lead_table","title":"客户线索",
+ "columns":["id","name","status","priority","assignee","lastFollowUpAt"],
+ "rows":[{"id":"LD-2026-0001","name":"王小明","status":"成交","priority":"high",
+          "assignee":"张明","lastFollowUpAt":"2026-06-05 06:23"}],
+ "total":35}
+```
+
+- `columns` 可传字符串数组，也可传 `{key,label,align}`；前端内置编号 / 客户姓名 / 状态 / 优先级等中文表头；
+- `status`、`priority` 会自动渲染成彩色胶囊（成交绿、客户流失红、长期未跟进琥珀）；
+- 前端最多渲染 50 行，表头固定、超宽横向滚动；`total` 与 `rows.length` 不一致时显示「共 N 条，显示前 M 条」；
+- 发送时机建议紧跟在对应工具结果之后，一条工具调用配一张卡片。
+

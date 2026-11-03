@@ -8,6 +8,7 @@ import { BotAvatar, CopyIcon, ThinkingDots, UserAvatar } from "./chat/Atoms";
 import ToolPanel, { type ToolCallView } from "./chat/ToolPanel";
 import MarkdownRenderer from "./chat/MarkdownRenderer";
 import LeadAnalysisCard, { type LeadAnalysisData } from "./chat/LeadAnalysisCard";
+import DataTableCard, { type DataTableCardData } from "./chat/DataTableCard";
 
 /* ========== 类型 ========== */
 
@@ -19,6 +20,8 @@ interface ChatMessage {
   role: "user" | "agent";
   content: string;
   tools: ToolCall[];
+  /** 工具明细卡片（来自 tool_data 事件，不进模型上下文） */
+  cards: DataTableCardData[];
   streaming?: boolean;
   error?: boolean;
   time: string;
@@ -40,11 +43,19 @@ interface HealthInfo {
 /* SSE 事件（与 agent/app.py 的 /chat/stream 对齐） */
 interface StreamEvent {
   node?: string;
-  type: "token" | "ai" | "tool" | "human" | "system" | "error" | "session" | "warn";
+  type: "token" | "ai" | "tool" | "human" | "system" | "error" | "session" | "warn" | "tool_data";
   content?: string;
   tool_calls?: { name: string; args: Record<string, unknown>; id?: string }[];
   tool_call_id?: string | null;
   session?: SessionMeta;
+  /* tool_data：工具明细，直接渲染成表格，不进入 messages[].content */
+  tool?: string;
+  kind?: string;
+  title?: string;
+  columns?: (string | { key: string; label?: string; align?: "left" | "right" })[];
+  rows?: Record<string, unknown>[];
+  total?: number;
+  tool_data?: DataTableCardData;
 }
 
 /* ========== 常量 ========== */
@@ -92,6 +103,8 @@ function toChatMessages(raw: HistoryMessage[]): ChatMessage[] {
       args: t.args ?? {},
       result: t.result ?? undefined,
     })),
+    // 明细卡片不落库，历史会话只回放正文与工具轨迹
+    cards: [],
     time: "",
   }));
 }
@@ -222,6 +235,7 @@ export default function AgentChat() {
         role: "user",
         content: text,
         tools: [],
+        cards: [],
         time: nowTime(),
       };
       const agentMsg: ChatMessage = {
@@ -229,6 +243,7 @@ export default function AgentChat() {
         role: "agent",
         content: "",
         tools: [],
+        cards: [],
         streaming: true,
         time: nowTime(),
       };
@@ -267,6 +282,7 @@ export default function AgentChat() {
       // 流式过程中累积状态（避免依赖 message 快照）
       let content = "";
       let tools: ToolCall[] = [];
+      let cards: DataTableCardData[] = [];
 
       try {
         const res = await fetch(`${AGENT_BASE}/chat/stream`, {
@@ -334,6 +350,25 @@ export default function AgentChat() {
                   i === realIdx ? { ...t, result: event.content ?? "" } : t,
                 );
                 patchMessage(agentMsg.id, { tools: [...tools] });
+              }
+            } else if (event.type === "tool_data") {
+              // 工具明细：渲染成表格卡片。刻意不写进 content，
+              // 这样后续轮次模型只看得到摘要，明细不会反复占用上下文。
+              const payload: DataTableCardData | null =
+                event.tool_data ??
+                (event.columns?.length
+                  ? {
+                      kind: event.kind,
+                      title: event.title,
+                      tool: event.tool,
+                      columns: event.columns.map((c) => (typeof c === "string" ? { key: c } : c)),
+                      rows: event.rows ?? [],
+                      total: event.total,
+                    }
+                  : null);
+              if (payload && payload.columns.length) {
+                cards = [...cards, payload];
+                patchMessage(agentMsg.id, { cards: [...cards] });
               }
             } else if (event.type === "session" && event.session) {
               // 服务端回传会话索引（标题 / 轮数 / 活跃时间），列表按时间倒序校准
@@ -426,6 +461,7 @@ export default function AgentChat() {
           role: "agent",
           content: `加载会话记录失败：${detail}\n\n请确认 Agent 服务已启动（127.0.0.1:3200）。`,
           tools: [],
+          cards: [],
           error: true,
           time: "",
         },
@@ -917,8 +953,9 @@ function MessageRow({
 }) {
   const isUser = msg.role === "user";
   const hasTools = !isUser && msg.tools.length > 0;
-  // 有工具在跑且还没正文时，只显示工具面板，不显示空气泡
-  const showBubble = isUser || !!msg.content || (msg.streaming && !hasTools);
+  const hasCards = !isUser && msg.cards.length > 0;
+  // 有工具在跑（或已带回明细卡片）且还没正文时，只显示面板/卡片，不显示空气泡
+  const showBubble = isUser || !!msg.content || (msg.streaming && !hasTools && !hasCards);
 
   return (
     <div
@@ -942,6 +979,10 @@ function MessageRow({
       >
         {/* 工具调用轨迹（在气泡上方，按执行顺序展示） */}
         {hasTools && <ToolPanel tools={msg.tools} />}
+
+        {/* 工具明细表格（来自 tool_data 事件） */}
+        {hasCards &&
+          msg.cards.map((card, index) => <DataTableCard key={`${msg.id}-card-${index}`} data={card} />)}
 
         {showBubble &&
           (isUser ? (
