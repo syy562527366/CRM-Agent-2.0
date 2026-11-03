@@ -1,20 +1,18 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import { useAuth } from "@/context/AuthContext";
 import Sidebar from "./Sidebar";
 import SessionPanel, { type SessionMeta } from "./SessionPanel";
+import { BotAvatar, CopyIcon, ThinkingDots, UserAvatar } from "./chat/Atoms";
+import ToolPanel, { type ToolCallView } from "./chat/ToolPanel";
+import MarkdownRenderer from "./chat/MarkdownRenderer";
+import LeadAnalysisCard, { type LeadAnalysisData } from "./chat/LeadAnalysisCard";
 
 /* ========== 类型 ========== */
 
-interface ToolCall {
-  name: string;
-  args: Record<string, unknown>;
-  result?: string;
-  id?: string;
-}
+/** 工具调用（流式与历史消息共用；result 为空表示仍在执行） */
+type ToolCall = ToolCallView;
 
 interface ChatMessage {
   id: string;
@@ -96,25 +94,6 @@ function toChatMessages(raw: HistoryMessage[]): ChatMessage[] {
     })),
     time: "",
   }));
-}
-
-/** 工具参数压成一行短文本，单参数直接取值 */
-function formatArgs(args: Record<string, unknown>): string {
-  const entries = Object.entries(args ?? {});
-  if (entries.length === 0) return "";
-  if (entries.length === 1) return String(entries[0][1]);
-  return entries.map(([k, v]) => `${k}: ${v}`).join(", ");
-}
-
-/* ========== 图标 ========== */
-
-function SparkIcon({ size = 15 }: { size?: number }) {
-  return (
-    <svg viewBox="0 0 24 24" fill="currentColor" width={size} height={size}>
-      <path d="M12 2.5l1.9 5.1 5.1 1.9-5.1 1.9L12 16.5l-1.9-5.1L5 9.5l5.1-1.9L12 2.5z" />
-      <path d="M18.5 14.5l.95 2.55 2.55.95-2.55.95-.95 2.55-.95-2.55L15 18l2.55-.95.95-2.55z" opacity=".65" />
-    </svg>
-  );
 }
 
 /* ========== 主组件 ========== */
@@ -728,7 +707,7 @@ export default function AgentChat() {
                 <MessageRow
                   key={msg.id}
                   msg={msg}
-                  userName={user?.name ?? "我"}
+                  userInitial={(user?.name ?? "我").slice(0, 1)}
                   copied={copiedId === msg.id}
                   onCopy={() => void handleCopy(msg)}
                 />
@@ -741,26 +720,14 @@ export default function AgentChat() {
         <div style={{ flexShrink: 0, borderTop: "1px solid #E2E8F0", background: "#fff", padding: "14px 32px 16px" }}>
           <div style={{ maxWidth: 860, margin: "0 auto" }}>
             <div
+              className="chat-input-box"
               style={{
                 display: "flex",
                 alignItems: "flex-end",
                 gap: 10,
-                border: "1px solid #E2E8F0",
                 borderRadius: 14,
                 padding: "10px 10px 10px 14px",
                 background: "#fff",
-                boxShadow: "0 1px 2px rgba(15,23,42,0.04)",
-                transition: "border-color .15s ease, box-shadow .15s ease",
-              }}
-              onFocusCapture={(e) => {
-                const el = e.currentTarget as HTMLElement;
-                el.style.borderColor = "#BFDBFE";
-                el.style.boxShadow = "0 0 0 3px rgba(37,99,235,0.08)";
-              }}
-              onBlurCapture={(e) => {
-                const el = e.currentTarget as HTMLElement;
-                el.style.borderColor = "#E2E8F0";
-                el.style.boxShadow = "0 1px 2px rgba(15,23,42,0.04)";
               }}
             >
               <textarea
@@ -873,62 +840,47 @@ function EmptyState({ onPick, health }: { onPick: (text: string) => void; health
         padding: "40px 32px",
       }}
     >
-      <div
-        style={{
-          width: 52,
-          height: 52,
-          borderRadius: 16,
-          background: "linear-gradient(135deg, #2563EB 0%, #60A5FA 100%)",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          color: "#fff",
-          boxShadow: "0 8px 20px rgba(37,99,235,0.24)",
-          marginBottom: 18,
-        }}
-      >
-        <SparkIcon size={24} />
+      <div style={{ marginBottom: 18, borderRadius: 17, boxShadow: "0 10px 24px rgba(37,99,235,0.22)" }}>
+        <BotAvatar size={54} />
       </div>
 
       <h2 style={{ fontSize: 18, fontWeight: 700, color: "#0F172A", margin: 0 }}>CRM 智能助手</h2>
-      <p style={{ fontSize: 13, color: "#64748B", marginTop: 6, marginBottom: 26, textAlign: "center", lineHeight: 1.7 }}>
+      <p style={{ fontSize: 13, color: "#64748B", marginTop: 6, marginBottom: 16, textAlign: "center", lineHeight: 1.7 }}>
         基于 DeepAgents 的本地 Agent 服务
-        {health ? ` · ${health.model} · ${health.tools.length} 个工具` : ""}
+        {health ? ` · ${health.model}` : ""}
         <br />
         可以帮你分析线索、拆解任务、写邮件、做计算
       </p>
 
+      {health && health.tools.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "center", gap: 6, marginBottom: 26 }}>
+          {health.tools.map((t) => (
+            <span
+              key={t}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 5,
+                padding: "3px 9px",
+                borderRadius: 999,
+                border: "1px solid #E2E8F0",
+                background: "#fff",
+                fontSize: 11.5,
+                fontWeight: 600,
+                color: "#475569",
+                fontFamily: '"SFMono-Regular", ui-monospace, Menlo, Consolas, monospace',
+              }}
+            >
+              <span style={{ width: 5, height: 5, borderRadius: "50%", background: "#22C55E", flexShrink: 0 }} />
+              {t}
+            </span>
+          ))}
+        </div>
+      )}
+
       <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10, width: "100%", maxWidth: 620 }}>
         {SUGGESTIONS.map((text) => (
-          <button
-            key={text}
-            onClick={() => onPick(text)}
-            style={{
-              textAlign: "left",
-              padding: "12px 14px",
-              borderRadius: 10,
-              border: "1px solid #E2E8F0",
-              background: "#fff",
-              color: "#334155",
-              fontSize: 12.5,
-              lineHeight: 1.6,
-              fontFamily: "inherit",
-              cursor: "pointer",
-              transition: "all .15s ease",
-            }}
-            onMouseEnter={(e) => {
-              const el = e.currentTarget;
-              el.style.borderColor = "#BFDBFE";
-              el.style.background = "#F8FBFF";
-              el.style.color = "#1D4ED8";
-            }}
-            onMouseLeave={(e) => {
-              const el = e.currentTarget;
-              el.style.borderColor = "#E2E8F0";
-              el.style.background = "#fff";
-              el.style.color = "#334155";
-            }}
-          >
+          <button key={text} className="suggestion-card" onClick={() => onPick(text)}>
             {text}
           </button>
         ))}
@@ -937,20 +889,36 @@ function EmptyState({ onPick, health }: { onPick: (text: string) => void; health
   );
 }
 
+/* ========== 线索分析卡片围栏渲染 ========== */
+
+function renderLeadCard(raw: string) {
+  try {
+    const data = JSON.parse(raw) as LeadAnalysisData;
+    if (!data || typeof data !== "object" || !data.customer) return null;
+    return <LeadAnalysisCard data={data} />;
+  } catch {
+    // 流式输出中 JSON 尚未闭合，交给渲染器显示占位动画
+    return null;
+  }
+}
+
 /* ========== 单条消息 ========== */
 
 function MessageRow({
   msg,
-  userName,
+  userInitial,
   copied,
   onCopy,
 }: {
   msg: ChatMessage;
-  userName: string;
+  userInitial: string;
   copied: boolean;
   onCopy: () => void;
 }) {
   const isUser = msg.role === "user";
+  const hasTools = !isUser && msg.tools.length > 0;
+  // 有工具在跑且还没正文时，只显示工具面板，不显示空气泡
+  const showBubble = isUser || !!msg.content || (msg.streaming && !hasTools);
 
   return (
     <div
@@ -961,150 +929,83 @@ function MessageRow({
         alignItems: "flex-start",
       }}
     >
-      {/* 头像 */}
+      {isUser ? <UserAvatar initial={userInitial} size={30} /> : <BotAvatar size={32} />}
+
       <div
         style={{
-          width: 30,
-          height: 30,
-          borderRadius: 9,
-          flexShrink: 0,
+          maxWidth: isUser ? "74%" : "84%",
+          minWidth: 0,
           display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          fontSize: 12,
-          fontWeight: 700,
-          marginTop: 2,
-          ...(isUser
-            ? { background: "#DBEAFE", color: "#2563EB" }
-            : {
-                background: "linear-gradient(135deg, #2563EB 0%, #60A5FA 100%)",
-                color: "#fff",
-                boxShadow: "0 2px 6px rgba(37,99,235,0.25)",
-              }),
+          flexDirection: "column",
+          alignItems: isUser ? "flex-end" : "flex-start",
         }}
       >
-        {isUser ? userName.slice(0, 1) : <SparkIcon size={15} />}
-      </div>
+        {/* 工具调用轨迹（在气泡上方，按执行顺序展示） */}
+        {hasTools && <ToolPanel tools={msg.tools} />}
 
-      {/* 气泡 */}
-      <div style={{ maxWidth: isUser ? "72%" : "82%", minWidth: 0 }}>
-        <div
-          style={
-            isUser
-              ? {
-                  background: "#2563EB",
-                  color: "#fff",
-                  padding: "10px 14px",
-                  borderRadius: "12px 12px 3px 12px",
-                  fontSize: 14,
-                  lineHeight: 1.7,
-                  whiteSpace: "pre-wrap",
-                  wordBreak: "break-word",
-                  boxShadow: "0 1px 2px rgba(37,99,235,0.18)",
-                }
-              : {
-                  background: msg.error ? "#FEF2F2" : "#fff",
-                  border: `1px solid ${msg.error ? "#FECACA" : "#E2E8F0"}`,
-                  padding: "12px 16px",
-                  borderRadius: "12px 12px 12px 3px",
-                  boxShadow: "0 1px 2px rgba(15,23,42,0.04)",
-                }
-          }
-        >
-          {/* 工具调用轨迹 */}
-          {!isUser && msg.tools.length > 0 && (
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: msg.content ? 10 : 0 }}>
-              {msg.tools.map((tool, i) => (
-                <span
-                  key={`${tool.name}-${i}`}
-                  title={tool.result ? `返回：${tool.result}` : "执行中…"}
-                  style={{
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: 5,
-                    padding: "3px 9px",
-                    borderRadius: 999,
-                    border: "1px solid #E2E8F0",
-                    background: "#F8FAFC",
-                    fontSize: 11.5,
-                    fontWeight: 600,
-                    color: "#475569",
-                    maxWidth: "100%",
-                  }}
-                >
-                  <svg viewBox="0 0 24 24" fill="none" stroke="#2563EB" strokeWidth="2" width="11" height="11" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M14.7 6.3a4 4 0 0 0 5 5l-9.4 9.4a2.1 2.1 0 0 1-3-3l9.4-9.4z" />
-                  </svg>
-                  <span style={{ whiteSpace: "nowrap" }}>{tool.name}</span>
-                  {formatArgs(tool.args) && (
-                    <span
-                      style={{
-                        fontWeight: 400,
-                        color: "#94A3B8",
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                        maxWidth: 180,
-                      }}
-                    >
-                      {formatArgs(tool.args)}
-                    </span>
-                  )}
-                  {tool.result !== undefined && (
-                    <svg viewBox="0 0 24 24" fill="none" stroke="#10B981" strokeWidth="3" width="11" height="11" strokeLinecap="round" strokeLinejoin="round">
-                      <polyline points="20 6 9 17 4 12" />
-                    </svg>
-                  )}
-                </span>
-              ))}
+        {showBubble &&
+          (isUser ? (
+            <div
+              style={{
+                background: "#2563EB",
+                color: "#fff",
+                padding: "10px 15px",
+                borderRadius: "14px 14px 4px 14px",
+                fontSize: 14,
+                lineHeight: 1.68,
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-word",
+                boxShadow: "0 2px 6px rgba(37,99,235,0.18)",
+              }}
+            >
+              {msg.content}
             </div>
-          )}
-
-          {/* 正文 */}
-          {isUser ? (
-            msg.content
-          ) : msg.content ? (
-            <div className="md-body">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
-              {msg.streaming && <span className="chat-cursor" />}
+          ) : (
+            <div
+              style={{
+                background: msg.error ? "#FFF5F5" : "#fff",
+                border: `1px solid ${msg.error ? "#FECACA" : "#E2E8F0"}`,
+                padding: "11px 15px",
+                borderRadius: "4px 14px 14px 14px",
+                minWidth: 56,
+                maxWidth: "100%",
+                overflow: "hidden",
+                boxShadow: "0 1px 3px rgba(15,23,42,0.05)",
+              }}
+            >
+              {msg.content ? (
+                <>
+                  <MarkdownRenderer content={msg.content} renderCodeBlock={renderLeadCard} />
+                  {msg.streaming && <span className="chat-cursor" />}
+                </>
+              ) : (
+                <ThinkingDots label="思考中…" />
+              )}
             </div>
-          ) : msg.streaming ? (
-            <div style={{ display: "flex", alignItems: "center", gap: 5, padding: "4px 2px" }}>
-              <span className="chat-dot" />
-              <span className="chat-dot" />
-              <span className="chat-dot" />
-              <span style={{ fontSize: 12.5, color: "#94A3B8", marginLeft: 6 }}>思考中…</span>
-            </div>
-          ) : null}
-        </div>
+          ))}
 
         {/* 时间 / 复制 */}
         <div
-          className="group"
+          className="msg-meta"
           style={{
             display: "flex",
             alignItems: "center",
             gap: 8,
-            marginTop: 4,
+            marginTop: 5,
             justifyContent: isUser ? "flex-end" : "flex-start",
             padding: "0 2px",
+            minHeight: 16,
           }}
         >
-          {msg.time && <span style={{ fontSize: 11, color: "#CBD5E1" }}>{msg.time}</span>}
+          {msg.streaming ? (
+            <span style={{ fontSize: 11, color: "#94A3B8" }}>正在生成…</span>
+          ) : (
+            msg.time && <span style={{ fontSize: 11, color: "#94A3B8" }}>{msg.time}</span>
+          )}
+
           {!isUser && !msg.streaming && msg.content && (
-            <button
-              onClick={onCopy}
-              className="opacity-0 group-hover:opacity-100 transition-opacity"
-              style={{
-                border: "none",
-                background: "transparent",
-                color: copied ? "#10B981" : "#94A3B8",
-                fontSize: 11,
-                fontFamily: "inherit",
-                cursor: "pointer",
-                padding: 0,
-              }}
-            >
+            <button className="msg-action" onClick={onCopy} title="复制本条回答">
+              <CopyIcon copied={copied} size={11} />
               {copied ? "已复制" : "复制"}
             </button>
           )}

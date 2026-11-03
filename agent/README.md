@@ -53,6 +53,16 @@ cd agent && ./.venv/Scripts/python.exe app.py
 
 CRM 前端「AI 助手」页（`/agent`）通过 Next rewrite `/agent-api/*` 代理到本服务，无需额外配置 CORS。
 
+## 工具
+
+| 工具 | 说明 |
+|---|---|
+| `calculator` | AST 安全求值四则运算，不执行 `eval`，除零等错误以「计算失败」文本返回 |
+| `get_current_time` | 时区感知的当前时间（Windows 需装 `tzdata`，否则回退 `(local)`） |
+| `crm_read_leads` | 读取 `../data/leads.json`，支持按 status / priority / keyword 过滤与 limit 截断，供「线索分析卡片」使用 |
+
+系统提示词约定：写线索分析结论时，额外输出一个 ```lead-analysis-card 代码块（JSON），前端会把它渲染成结构化卡片，而不是代码块。
+
 `thread_id` 相同即同一会话。对话状态落在 SQLite（`agent/data/agent.db`，`SqliteSaver`），**进程重启不丢**；会话列表另存在同库的 `sessions` 表（标题取首条提问，轮数取提问次数）。
 
 ## 测试
@@ -70,7 +80,7 @@ agent/.venv/Scripts/python.exe agent/test_agent.py
 ```
 agent/
 ├── app.py            FastAPI 服务 + deep agent 构建（create_deep_agent）
-├── tools.py          calculator / get_current_time 两个工具
+├── tools.py          calculator / get_current_time / crm_read_leads 三个工具
 ├── test_agent.py     冒烟测试
 ├── requirements.txt
 ├── data/agent.db     对话状态 + 会话索引（SQLite，已 gitignore）

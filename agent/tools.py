@@ -1,17 +1,39 @@
 """Agent 可调用的基础工具集。
 
 deepagents 的 deep agent 默认已具备 todo / filesystem / subagent 能力，
-这里补充两个业务上最常用的轻量工具，用于验证「工具调用」链路。
+这里补充业务上最常用的轻量工具：计算、时间、CRM 线索查询。
 """
 
 from __future__ import annotations
 
 import ast
+import json
 import operator
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from langchain_core.tools import tool
+
+# CRM 线索数据文件（与本仓库前端共用 data/leads.json）
+LEADS_PATH = Path(__file__).resolve().parent.parent / "data" / "leads.json"
+
+# 对外暴露的字段（去掉身份证等敏感信息）
+_LEAD_FIELDS = (
+    "id",
+    "name",
+    "status",
+    "priority",
+    "source",
+    "assignee",
+    "intentProduct",
+    "budgetRange",
+    "communicationCount",
+    "lastFollowUpAt",
+    "remark",
+    "customerPosition",
+    "trialDuration",
+)
 
 _BIN_OPS = {
     ast.Add: operator.add,
@@ -67,4 +89,37 @@ def get_current_time(timezone: str = "Asia/Shanghai") -> str:
     return f"{now.strftime('%Y-%m-%d %H:%M:%S')} ({timezone})"
 
 
-TOOLS = [calculator, get_current_time]
+@tool
+def crm_read_leads(status: str = "", priority: str = "", keyword: str = "", limit: int = 5) -> str:
+    """查询 CRM 线索（客户）数据，返回 JSON 数组。
+
+    Args:
+        status: 按状态筛选，例如 "成交"、"客户流失"、"跟进中"；留空表示不限。
+        priority: 按意向等级筛选：high / medium / low；留空表示不限。
+        keyword: 按客户姓名或线索编号模糊匹配；留空表示不限。
+        limit: 最多返回的条数，默认 5，最大 20。
+    """
+    try:
+        raw = json.loads(LEADS_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return f"线索数据文件不存在：{LEADS_PATH}"
+    except json.JSONDecodeError as exc:
+        return f"线索数据解析失败：{exc}"
+
+    rows = raw if isinstance(raw, list) else raw.get("leads", [])
+    items: list[dict] = []
+    for row in rows:
+        if status and status not in str(row.get("status", "")):
+            continue
+        if priority and str(row.get("priority", "")).lower() != priority.lower():
+            continue
+        if keyword and keyword not in str(row.get("name", "")) and keyword not in str(row.get("id", "")):
+            continue
+        items.append({k: row.get(k) for k in _LEAD_FIELDS if k in row})
+
+    total = len(items)
+    items = items[: max(1, min(int(limit or 5), 20))]
+    return json.dumps({"total": total, "count": len(items), "leads": items}, ensure_ascii=False)
+
+
+TOOLS = [calculator, get_current_time, crm_read_leads]
