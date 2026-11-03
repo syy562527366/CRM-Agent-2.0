@@ -61,7 +61,7 @@ agent/             DeepAgents + DeepSeek 的 Python Agent 服务（独立 venv�
 - 空状态：机器人图标 + 模型与工具能力徽章 + 4 条 CRM 场景引导问句，点击即发送。
 - 组件拆分：`src/components/chat/` 下 Atoms（头像/图标/徽章）、ToolPanel、MarkdownRenderer、LeadAnalysisCard，全部内联样式 + `globals.css` 类，零 Tailwind 依赖。
 - 输入框：Enter 发送、Shift + Enter 换行；中文输入法组合态（`isComposing` / `keyCode 229` / 组合结束后 150ms 内）按 Enter 不会误发送。
-- 会话管理栏（左侧）：顶部固定「创建会话」，下方按时间倒序展示历史会话；悬浮条目显删除按钮（二次点击确认，3 秒内），点击条目加载该会话历史；收起后由详情页顶栏最左侧的「展开」按钮恢复，折叠状态存 `localStorage`。
+- 会话管理栏（左侧）：顶部固定「创建会话」，下方按时间倒序展示历史会话；悬浮条目显删除按钮，**单击即删除**（同时移除服务端记录与 checkpoint）；点击条目加载该会话历史；收起后由详情页顶栏最左侧的「展开」按钮恢复，折叠状态存 `localStorage`。
 - 会话列表与历史消息来自 Agent 服务的 `/sessions`、`/threads/{id}`，历史消息与实时消息共用同一份 `messages` 状态和同一套气泡渲染。
 - 权限：页面 key 为 `agent`，在「角色与权限」中按角色配置访问权（默认管理员、销售均可查看）。
 

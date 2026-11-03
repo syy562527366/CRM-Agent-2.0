@@ -271,17 +271,11 @@ body {
 }
 
 .session-item:hover .session-del,
-.session-del:focus-visible,
-.session-del.is-armed {
+.session-del:focus-visible {
   opacity: 1;
 }
 
 .session-del:hover {
-  background: #fee2e2;
-  color: #dc2626;
-}
-
-.session-del.is-armed {
   background: #fee2e2;
   color: #dc2626;
 }

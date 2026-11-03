@@ -1,7 +1,5 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-
 /* ========== 类型 ========== */
 
 export interface SessionMeta {
@@ -90,28 +88,6 @@ export default function SessionPanel({
   onDelete: (id: string) => void;
   onCollapse: () => void;
 }) {
-  // 删除二次确认：首次点击进入待确认态，3 秒内再点才真删
-  const [armedId, setArmedId] = useState<string | null>(null);
-  const timerRef = useRef<number | null>(null);
-
-  useEffect(() => {
-    return () => {
-      if (timerRef.current) window.clearTimeout(timerRef.current);
-    };
-  }, []);
-
-  const armDelete = (id: string) => {
-    if (armedId === id) {
-      if (timerRef.current) window.clearTimeout(timerRef.current);
-      setArmedId(null);
-      onDelete(id);
-      return;
-    }
-    setArmedId(id);
-    if (timerRef.current) window.clearTimeout(timerRef.current);
-    timerRef.current = window.setTimeout(() => setArmedId(null), 3000);
-  };
-
   return (
     <aside
       style={{
@@ -333,12 +309,12 @@ export default function SessionPanel({
                 </div>
 
                 <button
-                  className={`session-del${armedId === s.id ? " is-armed" : ""}`}
-                  title={armedId === s.id ? "再次点击确认删除" : "删除该会话"}
+                  className="session-del"
+                  title="删除该会话"
                   aria-label="删除该会话"
                   onClick={(e) => {
                     e.stopPropagation();
-                    armDelete(s.id);
+                    onDelete(s.id);
                   }}
                 >
                   <IconTrash />
