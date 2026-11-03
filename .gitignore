@@ -17,3 +17,6 @@ agent/data/
 # WorkBuddy 工作区元数据
 .workbuddy/
 
+
+# Agent 本地文件工作目录（FilesystemBackend 的真实落点）
+agent/workspace/

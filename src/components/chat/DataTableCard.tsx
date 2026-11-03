@@ -131,6 +131,8 @@ export default function DataTableCard({ data }: { data: DataTableCardData }) {
   const rows = (data.rows ?? []).slice(0, MAX_ROWS);
   const total = data.total ?? data.rows?.length ?? 0;
   const title = data.title || (data.kind ? KIND_TITLE[data.kind] : "") || "查询结果";
+  // 统计类卡片数的是「组」，明细类数的是「条」
+  const unit = data.kind === "stat_table" ? "组" : "条";
 
   if (!columns.length) return null;
 
@@ -161,7 +163,8 @@ export default function DataTableCard({ data }: { data: DataTableCardData }) {
         </svg>
         <span style={{ fontSize: 12.5, fontWeight: 700, color: "#334155" }}>{title}</span>
         <span style={{ fontSize: 11.5, color: "#94A3B8" }}>
-          共 {total} 条{rows.length < total ? `，显示前 ${rows.length} 条` : ""}
+          共 {total} {unit}
+          {rows.length < total ? `，显示前 ${rows.length} ${unit}` : ""}
         </span>
         <div style={{ flex: 1 }} />
         {data.tool && (

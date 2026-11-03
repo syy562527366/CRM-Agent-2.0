@@ -7,8 +7,8 @@
 
 - [x] **第一步（已完成，2026-11-03）**：抽取 `src/lib/crm/*` 数据访问层；补上服务端会话鉴权与功能/数据范围校验；6 个旧 `api/*/utils.ts` 已删除，13 个路由改为调用数据层。
 - [x] **第二步 · CRM 侧（已完成，2026-11-03）**：`/agent-api/*` 改 Route Handler，鉴权后注入 `x-crm-*` 身份头；新增 `/api/stats` 聚合接口；前端 `tool_data` 表格卡片就绪。见「十一」。
-- [ ] **第二步 · Agent 侧（待做）**：`agent/crm_client.py`、`agent/tools_crm.py` 六个只读工具、`app.py` 读取 `x-crm-context` 注入 `configurable.crm_ctx`、system prompt。
-- [ ] 第三步：`tool_data` 事件接线 + 审计日志。
+- [x] **第二步 · Agent 侧（已完成，2026-11-03）**：`crm_client.py` + `tools_crm.py`（7 个只读工具）接入，工具全部走 CRM HTTP API；`app.py` 解析 `x-crm-context` 注入 `configurable.crm_ctx`；`crm_read_leads` 已删除；`tool_data` 事件接通。冒烟测试 7/7。
+- [ ] 第三步：审计日志 `agent_audit`、工具级缓存、写操作审批。
 
 现状与目标之间仍存在的能力缺口，见下文「七、改造清单」。
 
@@ -238,10 +238,10 @@ def crm_search_leads(..., user: Annotated[CrmCtx, InjectedToolArg]) -> str
 1. ✅ `src/lib/crm/{leads,orders,products,communications,stats}.ts` —— 数据访问层，`/api/*` 改调用它。
 2. ✅ `src/app/agent-api/[...path]/route.ts` —— Route Handler 替代 `next.config.ts` 的 rewrite，
    在服务端注入 `x-crm-*` 身份头（见「十一」）。
-3. ⬜ `agent/crm_client.py` —— 封装对 CRM API 的调用（httpx，超时 5s，统一错误映射）。
-4. ⬜ `agent/tools_crm.py` —— 实现只读工具 6 个（search/get/timeline/orders/products/stats）。
-5. ⬜ `agent/app.py` —— 解析 `x-crm-context` → 注入 `configurable.crm_ctx`；`ChatRequest` 去掉 `user_id`。
-6. ⬜ 系统提示词补充：查询必须先调工具、无数据就说没有、`PERMISSION_DENIED` 不得绕过。
+3. ✅ `agent/crm_client.py` —— 封装对 CRM API 的调用（httpx，超时 5s，统一错误映射）。
+4. ✅ `agent/tools_crm.py` —— 实现只读工具 7 个（search / get / timeline / orders / products / lead_stats / sales_stats）。
+5. ✅ `agent/app.py` —— 解析 `x-crm-context` → 注入 `configurable.crm_ctx`；工具结果经 `tool_data_sink` 推 `tool_data` 事件。
+6. ✅ 系统提示词补充：查询必须先调工具、无数据就说没有、`PERMISSION_DENIED` 不得绕过、明细已由卡片展示不得重复列表格。
 7. ✅ `GET /api/stats` —— 线索分组计数与销售统计，数据范围在 service 层强制执行。
 
 ### P1（体验）

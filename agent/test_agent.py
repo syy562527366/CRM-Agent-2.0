@@ -6,6 +6,11 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import json
+import os
 import sys
 import time
 from typing import Any
@@ -16,16 +21,53 @@ BASE_URL = "http://127.0.0.1:3200"
 TIMEOUT = 180
 results: list[tuple[str, bool, str]] = []
 
+# 与 CRM 的 src/lib/auth/session.ts 共用同一套签名规则（本地开发默认密钥）
+SESSION_SECRET = os.getenv("CRM_SESSION_SECRET", "crm-local-dev-secret-please-override")
+
+# 销售角色（张明）的权限快照，生产环境这段应由 Next 代理注入，测试里手工模拟
+SALES_CTX = {
+    "uid": "ACCT-2026-0002",
+    "name": "张明",
+    "roleId": "ROLE-2026-0002",
+    "roleName": "销售",
+    "permissions": [
+        {"pageKey": "leads", "functions": ["查看", "修改", "增加"], "dataScope": "全部"},
+        {"pageKey": "orders", "functions": ["查看", "修改"], "dataScope": "全部"},
+        {"pageKey": "products", "functions": ["查看"], "dataScope": "全部"},
+        {"pageKey": "communications", "functions": ["查看"], "dataScope": "全部"},
+    ],
+}
+
+
+def _b64(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+
+def crm_headers(ctx: dict[str, Any] = SALES_CTX, ttl: int = 600) -> dict[str, str]:
+    """模拟 Next 代理注入的 x-crm-* 头。"""
+    body = _b64(
+        json.dumps(
+            {"uid": ctx["uid"], "rid": ctx["roleId"], "exp": int(time.time()) + ttl}
+        ).encode()
+    )
+    signature = _b64(hmac.new(SESSION_SECRET.encode(), body.encode(), hashlib.sha256).digest())
+    return {
+        "x-crm-user": ctx["uid"],
+        "x-crm-token": f"{body}.{signature}",
+        "x-crm-context": _b64(json.dumps(ctx, ensure_ascii=False).encode()),
+    }
+
 
 def check(name: str, ok: bool, detail: str = "") -> None:
     results.append((name, ok, detail))
     print(f"{'PASS' if ok else 'FAIL'} | {name}{' | ' + detail if detail else ''}")
 
 
-def post_chat(message: str, thread_id: str) -> dict[str, Any]:
+def post_chat(message: str, thread_id: str, headers: dict[str, str] | None = None) -> dict[str, Any]:
     resp = requests.post(
         f"{BASE_URL}/chat",
         json={"message": message, "thread_id": thread_id},
+        headers=headers or {},
         timeout=TIMEOUT,
     )
     resp.raise_for_status()
@@ -78,6 +120,24 @@ def main() -> int:
         check("会话历史 /threads", hist.get("count", 0) >= 4, f"消息数={hist.get('count')}")
     except Exception as exc:  # noqa: BLE001
         check("会话历史 /threads", False, str(exc))
+
+    # 6) 身份头透传：/whoami 应回显代理注入的身份
+    headers = crm_headers()
+    try:
+        me = requests.get(f"{BASE_URL}/whoami", headers=headers, timeout=20).json()
+        ok = me.get("name") == "张明" and me.get("role_name") == "销售"
+        check("身份头解析 /whoami", ok, f"{me.get('name')} / {me.get('role_name')}")
+    except Exception as exc:  # noqa: BLE001
+        check("身份头解析 /whoami", False, str(exc))
+
+    # 7) CRM 工具：带身份问线索数量，必须真的调用 crm_* 工具
+    try:
+        data = post_chat("现在一共有多少条线索？只要总数。", "test-crm-tool", headers=headers)
+        used = [c["name"] for c in data.get("tool_calls", [])]
+        hit = [name for name in used if name.startswith("crm_")]
+        check("CRM 工具调用", bool(hit), f"工具={used} 回复={data.get('reply', '')[:50]}")
+    except Exception as exc:  # noqa: BLE001
+        check("CRM 工具调用", False, str(exc))
 
     passed = sum(1 for _, ok, _ in results if ok)
     total = len(results)

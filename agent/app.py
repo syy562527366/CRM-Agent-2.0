@@ -21,13 +21,16 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import sqlite3
 import threading
 import uuid
 from datetime import datetime, timezone
 from functools import lru_cache
+from pathlib import Path
 from typing import Any, Iterator
 
+from deepagents.backends import FilesystemBackend
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import StreamingResponse
@@ -36,7 +39,12 @@ from langchain_deepseek import ChatDeepSeek
 from langgraph.checkpoint.sqlite import SqliteSaver
 from pydantic import BaseModel, Field
 
-from tools import TOOLS
+from crm_client import CrmCtx
+from tools import TOOLS as BASE_TOOLS
+from tools_crm import CRM_TOOLS
+
+# 通用工具 + CRM 只读工具
+TOOLS = [*BASE_TOOLS, *CRM_TOOLS]
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
@@ -50,14 +58,28 @@ DB_PATH = os.getenv("AGENT_DB_PATH", os.path.join(DATA_DIR, "agent.db"))
 
 SYSTEM_PROMPT = """你是一个严谨、简洁的中文智能助手，运行在本地部署的 DeepAgent 服务中，服务于一套 CRM 系统。
 
-工作要求：
-1. 先理解用户目标，需要多步任务时用 todo 工具拆解，再逐项推进。
-2. 涉及算术必须调用 calculator 工具，不要心算；涉及“现在几点”必须调用 get_current_time。
-3. 涉及具体客户 / 线索 / 订单数据时，必须调用 crm_read_leads 取真实数据，严禁编造客户信息。
-4. 工具返回结果后，用自然中文总结结论，不要粘贴原始 JSON。
-5. 不确定的信息要明确说明不确定，不要编造。
-6. 回答控制在 200 字以内，除非用户要求展开。
-7. 当用户要求「分析某条线索 / 客户」时，除了给一句简短结论，还要在回答末尾输出一个线索分析卡片，格式为：
+## 数据纪律（最重要）
+1. 涉及线索 / 客户 / 订单 / 商品 / 沟通记录 / 统计的问题，必须先调用 crm_* 工具取真实数据，
+   严禁凭印象编造客户、金额或条数。
+2. 所有数字必须来自工具返回。工具没给的数字不要算、不要猜；需要求和或求占比时调用 calculator。
+3. 工具返回 ok=false 时如实转述 message：
+   - PERMISSION_DENIED：直接说「当前账号没有 XX 权限」，不得改用其他工具拼凑或推测；
+   - INVALID_ARGUMENT：按返回的 options 修正参数重试一次，仍失败就问用户；
+   - TIMEOUT / SERVICE_UNAVAILABLE：告诉用户 CRM 服务暂时不可用。
+4. 工具返回的 items 是摘要且受 limit 限制，条数要看 total，不要说「一共只有 N 条」。
+   需要单个客户的细节时再调 crm_get_lead / crm_get_lead_timeline。
+5. 用户说「我的」「我负责的」时不要传 assignee，服务端会按数据范围自动过滤。
+6. 手机号等敏感字段只用工具返回的脱敏值，不要尝试还原。
+
+## 回答风格
+- 用自然中文先给结论再列要点，不要粘贴原始 JSON。
+- 线索 / 订单的明细已经以表格卡片的形式直接展示给用户了，
+  正文**不要重复罗列同样的表格**，用一两句话总结要点即可；需要对比或推导时再用 Markdown 表格。
+- 控制在 200 字以内，用户要求展开时才详细写。不确定就明说不确定。
+- 需要多步任务可用 todo 工具拆解；问时间用 get_current_time，算术用 calculator。
+
+## 线索分析卡片
+当用户要求「分析某条线索 / 客户」时，除了给一句简短结论，还要在回答末尾输出一个线索分析卡片，格式为：
 
 ```lead-analysis-card
 {"customer":"客户姓名","leadId":"LD-2026-0001","intent":"high","intentProduct":"意向产品","budget":"预算区间","commCount":5,"lastCommDate":"2026-06-05","competitors":[{"name":"竞品名","attitude":"price_sensitive","quote":"客户原话"}],"actions":[{"title":"动作标题","detail":"具体做法"}]}
@@ -207,9 +229,21 @@ def _delete_session(session_id: str) -> bool:
 # --------------------------------------------------------------------------- #
 # Agent 构建
 # --------------------------------------------------------------------------- #
-@lru_cache(maxsize=1)
-def get_agent():
-    """构建 deep agent（进程内单例，对话状态落在 SQLite，重启不丢）。"""
+# 每个账号一个独立工作目录：A 的文件不会被 B 的 ls / read_file 看到
+WORKSPACE_DIR = Path(
+    os.getenv("AGENT_WORKSPACE_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "workspace"))
+)
+_WS_UNSAFE = re.compile(r"[^A-Za-z0-9_-]")
+
+
+def _workspace_name(user_id: str) -> str:
+    cleaned = _WS_UNSAFE.sub("_", (user_id or "").strip())[:40]
+    return cleaned or "_shared"
+
+
+@lru_cache(maxsize=16)
+def get_agent(workspace: str = "_shared"):
+    """构建 deep agent（按工作目录缓存，对话状态落在 SQLite，重启不丢）。"""
     if not API_KEY:
         raise RuntimeError("未配置 DEEPSEEK_API_KEY，请检查 agent/.env")
 
@@ -221,22 +255,55 @@ def get_agent():
         max_tokens=2048,
         timeout=120,
     )
-    return create_agent_with(model)
+    return create_agent_with(model, workspace)
 
 
-def create_agent_with(model: ChatDeepSeek):
+def create_agent_with(model: ChatDeepSeek, workspace: str = "_shared"):
     from deepagents import create_deep_agent
+
+    root = WORKSPACE_DIR / workspace
+    root.mkdir(parents=True, exist_ok=True)
+
+    # 用 FilesystemBackend 让 ls / read_file / write_file 落到真实磁盘（重启不丢）。
+    # virtual_mode=True 把这个目录当成虚拟根：绝对路径和 ".." 都会被挡住，
+    # 因此 agent/.env、项目 data/*.json 这些敏感文件读不到。
+    backend = FilesystemBackend(root_dir=str(root), virtual_mode=True)
 
     return create_deep_agent(
         model=model,
         tools=TOOLS,
         system_prompt=SYSTEM_PROMPT,
         checkpointer=checkpointer,
+        backend=backend,
     )
 
 
-def _config(thread_id: str) -> dict[str, Any]:
-    return {"configurable": {"thread_id": thread_id}, "recursion_limit": 60}
+def _config(
+    thread_id: str,
+    ctx: CrmCtx | None = None,
+    sink: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """调用者身份与 tool_data 队列都走 configurable —— 模型看不到，也无法伪造。"""
+    configurable: dict[str, Any] = {"thread_id": thread_id}
+    if ctx is not None:
+        configurable["crm_ctx"] = ctx
+    if sink is not None:
+        configurable["tool_data_sink"] = sink
+    return {"configurable": configurable, "recursion_limit": 80}
+
+
+def _parse_identity(context: str, token: str, user_id: str) -> CrmCtx:
+    """把 Next 代理注入的 x-crm-* 头还原成调用者上下文。"""
+    return CrmCtx.from_headers(context, token=token, uid=user_id)
+
+
+def _drain(sink: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """取出本轮已产生的明细卡片并清空队列。"""
+    if not sink:
+        return []
+    cards = list(sink)
+    sink.clear()
+    return cards
 
 
 # --------------------------------------------------------------------------- #
@@ -439,18 +506,24 @@ def remove_session(session_id: str) -> dict[str, Any]:
 
 
 @app.post("/chat")
-def chat(req: ChatRequest) -> dict[str, Any]:
+def chat(
+    req: ChatRequest,
+    x_crm_context: str = Header(default=""),
+    x_crm_token: str = Header(default=""),
+    x_crm_user: str = Header(default=""),
+) -> dict[str, Any]:
+    ctx = _parse_identity(x_crm_context, x_crm_token, x_crm_user or req.user_id)
     try:
-        agent = get_agent()
+        agent = get_agent(_workspace_name(ctx.uid or req.user_id))
         result = agent.invoke(
             {"messages": [HumanMessage(content=req.message)]},
-            config=_config(req.thread_id),
+            config=_config(req.thread_id, ctx),
         )
     except Exception as exc:  # noqa: BLE001 - 统一转成 502，便于前端展示
         raise HTTPException(status_code=502, detail=f"Agent 执行失败: {exc}") from exc
 
     messages = result.get("messages", [])
-    session = _sync_session(req.thread_id, messages, req.user_id)
+    session = _sync_session(req.thread_id, messages, ctx.uid or req.user_id)
 
     payload = _summarize(messages)
     payload["thread_id"] = req.thread_id
@@ -459,19 +532,28 @@ def chat(req: ChatRequest) -> dict[str, Any]:
 
 
 @app.post("/chat/stream")
-def chat_stream(req: ChatRequest) -> StreamingResponse:
+def chat_stream(
+    req: ChatRequest,
+    x_crm_context: str = Header(default=""),
+    x_crm_token: str = Header(default=""),
+    x_crm_user: str = Header(default=""),
+) -> StreamingResponse:
+    ctx = _parse_identity(x_crm_context, x_crm_token, x_crm_user or req.user_id)
+    workspace = _workspace_name(ctx.uid or req.user_id)
+    sink: list[dict[str, Any]] = []
+
     def sse(event: dict[str, Any]) -> str:
         return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
     def event_source() -> Iterator[str]:
         try:
-            agent = get_agent()
+            agent = get_agent(workspace)
             # 同时订阅两种流：
             #   messages → 逐 token 增量，前端可像打字机一样渲染
             #   updates  → 节点级快照，用于拿工具调用与最终文本
             for mode, chunk in agent.stream(
                 {"messages": [HumanMessage(content=req.message)]},
-                config=_config(req.thread_id),
+                config=_config(req.thread_id, ctx, sink),
                 stream_mode=["messages", "updates"],
             ):
                 if mode == "messages":
@@ -505,11 +587,15 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
                             event["tool_call_id"] = getattr(message, "tool_call_id", None)
                         yield sse(event)
 
+                # 工具执行完后把明细推给前端渲染表格，不进模型上下文
+                for card in _drain(sink):
+                    yield sse({"type": "tool_data", **card})
+
             # 本轮结束后刷新会话索引（标题 / 轮数 / 活跃时间）
             try:
-                state = agent.get_state(_config(req.thread_id))
+                state = agent.get_state(_config(req.thread_id, ctx))
                 messages = (state.values or {}).get("messages", []) if state else []
-                session = _sync_session(req.thread_id, messages, req.user_id)
+                session = _sync_session(req.thread_id, messages, ctx.uid or req.user_id)
                 yield sse({"type": "session", "session": session})
             except Exception as exc:  # noqa: BLE001 - 索引失败不影响本次回答
                 yield sse({"type": "warn", "content": f"会话索引更新失败: {exc}"})
