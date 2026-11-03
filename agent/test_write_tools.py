@@ -177,6 +177,47 @@ def main() -> int:
         r = call(crm_update_lead, {"lead_id": created[0]["id"], "priority": "超高"}, admin)
         check("修改线索 · 非法优先级", r.get("error") == "INVALID_ARGUMENT", r.get("message", "")[:34])
 
+        # ------------------------------------------------- 主数据：姓名 / 电话 / 来源
+        sink = []
+        r = call(crm_update_lead, {"lead_id": created[1]["id"], "name": "萧山", "source": "转介绍"}, admin, sink)
+        renamed = {c["field"]: c for c in r.get("changed", [])}
+        check(
+            "修改线索 · 改姓名与来源",
+            r.get("ok") and renamed.get("姓名", {}).get("after") == "萧山" and "客户来源" in renamed,
+            f"changed={list(renamed)}",
+        )
+        after = api.get(f"/api/leads/{created[1]['id']}").json()
+        check("修改线索 · 姓名已落盘", after["name"] == "萧山" and after["source"] == "转介绍", f"{after['name']} / {after['source']}")
+
+        new_phone = "13600001234"
+        r = call(crm_update_lead, {"lead_id": created[1]["id"], "phone": new_phone}, admin)
+        phone_change = {c["field"]: c for c in r.get("changed", [])}.get("电话", {})
+        check(
+            "修改线索 · 改电话且脱敏展示",
+            r.get("ok") and "****" in str(phone_change.get("after")) and any("订单" in w for w in r.get("warnings", [])),
+            f"{phone_change.get('before')} → {phone_change.get('after')}",
+        )
+        after = api.get(f"/api/leads/{created[1]['id']}").json()
+        check("修改线索 · 电话已落盘", after["phone"] == new_phone, after["phone"])
+
+        r = call(crm_update_lead, {"lead_id": created[0]["id"], "phone": new_phone}, admin)
+        check(
+            "修改线索 · 电话重复被拒",
+            r.get("error") == "DUPLICATE_PHONE" and bool(r.get("conflict")),
+            r.get("message", "")[:40],
+        )
+
+        r = call(crm_update_lead, {"lead_id": created[0]["id"], "phone": "12345"}, admin)
+        check("修改线索 · 非法电话被拒", r.get("error") == "INVALID_ARGUMENT", r.get("message", "")[:34])
+
+        r = call(crm_update_lead, {"lead_id": created[0]["id"], "name": "名" * 31}, admin)
+        check("修改线索 · 姓名超长被拒", r.get("error") == "INVALID_ARGUMENT", r.get("message", "")[:34])
+
+        # 姓名改回，保证后面「重名歧义」与「按姓名删除」的用例前提成立
+        r = call(crm_update_lead, {"lead_id": created[1]["id"], "name": "测试同名"}, admin)
+        check("修改线索 · 姓名改回", r.get("ok"), str(r.get("changed", []))[:50])
+
+
         # ------------------------------------------------------------ 重名歧义
         r = call(crm_update_lead, {"lead_id": "测试同名", "status": "成交"}, admin)
         check(

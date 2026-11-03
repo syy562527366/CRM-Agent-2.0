@@ -35,7 +35,12 @@ TRASH_PATH = _DATA_DIR / "trash.jsonl"
 _io_lock = threading.Lock()
 
 # 可修改字段白名单（CRM 字段名 → 中文标签）
+# 与 CRM「修改线索」抽屉保持一致：姓名 / 电话 / 优先级 / 来源 / 跟进人 + 业务属性。
+# 不含 id / createdAt / communicationCount / lastFollowUpAt：这些是系统维护的，改了会破坏统计与排序。
 _LEAD_PATCH = {
+    "name": "姓名",
+    "phone": "电话",
+    "source": "客户来源",
     "status": "状态",
     "priority": "优先级",
     "assignee": "负责人",
@@ -46,6 +51,12 @@ _LEAD_PATCH = {
     "remark": "备注",
 }
 _ORDER_PATCH = {"amount": "金额"}
+
+# 变更卡片里做脱敏展示的字段
+_MASK_IN_DIFF = {"phone"}
+
+_NAME_MAX = 30
+_SOURCE_MAX = 20
 
 _LEAD_DELETE_COLUMNS = ["id", "name", "status", "priority", "assignee", "lastFollowUpAt"]
 _ORDER_DELETE_COLUMNS = ["orderNo", "customerName", "productName", "amount", "createdAt"]
@@ -184,8 +195,18 @@ def _diff(before: dict[str, Any], after: dict[str, Any], labels: dict[str, str])
         old, new = before.get(field), after.get(field)
         if str(old or "") == str(new or ""):
             continue
+        if field in _MASK_IN_DIFF:
+            old, new = mask_phone(old), mask_phone(new)
         rows.append({"field": label, "before": "" if old is None else old, "after": "" if new is None else new})
     return rows
+
+
+def _check_phone(value: str) -> str:
+    """只做常识校验：11 位、以 1 开头。号码格式各国不同，不强求大陆号段，避免把合法数据挡在门外。"""
+    digits = "".join(ch for ch in value if ch.isdigit() or ch == "+")
+    if not digits.startswith("1") or len(digits) != 11:
+        raise ValueError(f"电话「{value}」不像 11 位手机号，请确认后再改（要清空请说明，不支持置空）")
+    return digits
 
 
 # --------------------------------------------------------------------------- #
@@ -194,6 +215,9 @@ def _diff(before: dict[str, Any], after: dict[str, Any], labels: dict[str, str])
 @tool
 def crm_update_lead(
     lead_id: str,
+    name: str = "",
+    phone: str = "",
+    source: str = "",
     status: str = "",
     priority: str = "",
     assignee: str = "",
@@ -206,11 +230,14 @@ def crm_update_lead(
 ) -> str:
     """修改单条线索的资料。只传需要改的字段，没传的字段保持原样。
 
-    用户说「把 X 改成成交」「这条线索转给李华」「预算改成 3-5 万」时用它。
-    执行前请先确认用户要改的是哪一条（编号或姓名），不要凭猜测批量改。
+    用户说「把 X 改成成交」「这条线索转给李华」「名字改成萧山」「电话写错了要改」
+    「预算改成 3-5 万」时用它。执行前先确认要改的是哪一条（编号或姓名），不要凭猜测批量改。
 
     Args:
         lead_id: 线索编号（LD-2026-0001）或客户姓名。姓名匹配到多条会返回 AMBIGUOUS 和候选列表，此时应该问用户而不是重试。
+        name: 新客户姓名，1~30 字。留空不改。
+        phone: 新手机号，11 位。号码被其他线索占用时会返回 DUPLICATE_PHONE；改号后该客户的历史订单不会自动跟着走，需在结果里提示用户。留空不改。
+        source: 新客户来源，例如「抖音」「官网咨询」「转介绍」。留空不改。
         status: 新状态：成交 / 客户流失 / 未接触 / 长期未跟进 / 推荐产品 / 价格异议。留空不改。
         priority: 新意向等级：high / medium / low。留空不改。
         assignee: 新负责人姓名，例如「李华」。留空不改。
@@ -225,6 +252,29 @@ def crm_update_lead(
         return dump(denied)
 
     patch: dict[str, Any] = {}
+
+    # -- 主数据：姓名 / 电话 / 来源（CRM 修改抽屉里也有这三项） --------------- #
+    if name.strip():
+        value = name.strip()
+        if len(value) > _NAME_MAX:
+            return dump(fail("INVALID_ARGUMENT", f"姓名最多 {_NAME_MAX} 个字，收到 {len(value)} 个"))
+        patch["name"] = value
+
+    phone_value = ""
+    if phone.strip():
+        try:
+            phone_value = _check_phone(phone.strip())
+        except ValueError as exc:
+            return dump(fail("INVALID_ARGUMENT", str(exc)))
+        patch["phone"] = phone_value
+
+    if source.strip():
+        value = source.strip()
+        if len(value) > _SOURCE_MAX:
+            return dump(fail("INVALID_ARGUMENT", f"客户来源最多 {_SOURCE_MAX} 个字，收到 {len(value)} 个"))
+        patch["source"] = value
+
+    # -- 业务属性 ------------------------------------------------------------ #
     if status.strip():
         norm, error = _normalize_status(status)
         if error:
@@ -250,7 +300,8 @@ def crm_update_lead(
         return dump(
             fail(
                 "INVALID_ARGUMENT",
-                "没有要修改的字段。请明确要改什么（状态 / 优先级 / 负责人 / 意向产品 / 预算 / 定位 / 试用时长 / 备注）",
+                "没有要修改的字段。请明确要改什么（姓名 / 电话 / 来源 / 状态 / 优先级 / 负责人 / "
+                "意向产品 / 预算 / 定位 / 试用时长 / 备注）",
                 updatable=list(_LEAD_PATCH.values()),
             )
         )
@@ -261,6 +312,25 @@ def crm_update_lead(
             return dump(resolve_error or fail("NOT_FOUND", "线索不存在"))
 
         lead_id_actual = str(lead.get("id", ""))
+
+        # 手机号是订单关联键（orders 通过 customerPhone 找客户），重复会让两套数据串台
+        if phone_value:
+            dup = client.list("/api/leads", {"phone": phone_value, "page": 1, "pageSize": 10})
+            if dup["ok"]:
+                others = [
+                    {"id": row.get("id", ""), "name": row.get("name", ""), "assignee": row.get("assignee", "")}
+                    for row in dup["items"]
+                    if str(row.get("id", "")) != lead_id_actual
+                ]
+                if others:
+                    return dump(
+                        fail(
+                            "DUPLICATE_PHONE",
+                            f"手机号 {mask_phone(phone_value)} 已被其他线索占用，不能重复使用，请先核对",
+                            conflict=others,
+                        )
+                    )
+
         target = f"{lead_id_actual}({lead.get('name', '')})"
         result = client.put(f"/api/leads/{lead_id_actual}", patch)
 
@@ -275,6 +345,11 @@ def crm_update_lead(
     warnings: list[str] = []
     if not changes:
         warnings.append("提交的值与原值一致，数据没有实际变化")
+    if "phone" in patch:
+        warnings.append(
+            "手机号是订单与线索的关联键：改号后该客户的历史订单仍挂在旧号码上，"
+            "报表里可能出现「有订单但查不到客户」，必要时需人工同步订单"
+        )
     if ctx.own_only("leads") and "assignee" in patch and patch["assignee"] != ctx.name:
         warnings.append(
             f"线索已转给 {patch['assignee']}，你的数据范围是「仅自己」，之后可能看不到这条线索"
@@ -300,6 +375,8 @@ def crm_update_lead(
             lead={
                 "id": lead_id_actual,
                 "name": after.get("name", ""),
+                "phone": mask_phone(after.get("phone")),
+                "source": after.get("source", ""),
                 "status": after.get("status", ""),
                 "priority": after.get("priority", ""),
                 "assignee": after.get("assignee", ""),
