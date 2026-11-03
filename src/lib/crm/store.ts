@@ -31,7 +31,8 @@ export function readJson<T>(file: string): T[] {
 export function writeJson<T>(file: string, rows: T[]): void {
   const target = dataPath(file);
   const tmp = `${target}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(rows, null, 2), "utf-8");
+  // 末尾保留换行，避免每次写入都产生 "\ No newline at end of file" 的假 diff
+  fs.writeFileSync(tmp, `${JSON.stringify(rows, null, 2)}\n`, "utf-8");
   fs.renameSync(tmp, target);
 }
 
