@@ -1,0 +1,2 @@
+# 数据文件由服务端写入（LF），固定行尾避免 Windows 下 autocrlf 造成假 diff
+data/*.json text eol=lf
