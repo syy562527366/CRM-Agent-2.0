@@ -12,6 +12,11 @@ import {
   type ModelProbe,
   type ToolPermission,
 } from "@/types/agentConfig";
+import {
+  classifyAgentFailure,
+  isOffline,
+  type AgentFailure,
+} from "@/lib/agent/errors";
 
 /* ========== 常量 ========== */
 
@@ -178,15 +183,151 @@ function Switch({
   );
 }
 
-/* ========== 主体 ========== */
+/**
+ * 服务没起时的排障卡。
+ *
+ * 原来这里只有一行「配置读取失败（HTTP 502）」——用户看不出 502 是进程没开、
+ * 还是自己点错了，也不知道下一步该做什么。这张卡把「结论 + 命令 + 重试」
+ * 放在一起，照着做就能恢复。
+ */
+function ServiceDownCard({
+  failure,
+  retrying,
+  onRetry,
+}: {
+  failure: AgentFailure;
+  retrying: boolean;
+  onRetry: () => void;
+}) {
+  const [copied, setCopied] = useState(false);
 
+  const copyCommand = useCallback(async () => {
+    if (!failure.command) return;
+    try {
+      await navigator.clipboard.writeText(failure.command);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1800);
+    } catch {
+      // 非 https / 限制剪贴板的环境：让用户手动选中命令，不弹错误打断他
+    }
+  }, [failure.command]);
+
+  return (
+    <div
+      style={{
+        ...CARD,
+        borderColor: "#FECACA",
+        background: "#FFFBFB",
+        padding: "18px 20px",
+        marginBottom: 16,
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+        <span
+          style={{
+            width: 26,
+            height: 26,
+            borderRadius: 8,
+            background: "#FEE2E2",
+            color: "#DC2626",
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            flexShrink: 0,
+          }}
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="9" /><line x1="12" y1="8" x2="12" y2="12.5" /><line x1="12" y1="16" x2="12" y2="16" />
+          </svg>
+        </span>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ fontSize: 14, fontWeight: 600, color: "#991B1B" }}>{failure.title}</div>
+          <div style={{ fontSize: 12.5, color: "#7F1D1D", marginTop: 4, lineHeight: 1.7 }}>
+            {failure.detail}
+          </div>
+        </div>
+      </div>
+
+      {failure.command && (
+        <div
+          style={{
+            marginTop: 12,
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            padding: "10px 12px",
+            borderRadius: 9,
+            background: "#0F172A",
+          }}
+        >
+          <code
+            style={{
+              flex: 1,
+              minWidth: 0,
+              fontSize: 12.5,
+              color: "#E2E8F0",
+              fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Courier New", monospace',
+              overflowX: "auto",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {failure.command}
+          </code>
+          <button
+            onClick={() => void copyCommand()}
+            style={{
+              flexShrink: 0,
+              padding: "4px 10px",
+              borderRadius: 6,
+              border: "1px solid rgba(226,232,240,.25)",
+              background: "transparent",
+              color: copied ? "#4ADE80" : "#CBD5E1",
+              fontSize: 11.5,
+              fontFamily: "inherit",
+              cursor: "pointer",
+            }}
+          >
+            {copied ? "已复制" : "复制"}
+          </button>
+        </div>
+      )}
+
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
+        <button
+          onClick={onRetry}
+          disabled={retrying}
+          style={{
+            padding: "7px 14px",
+            borderRadius: 8,
+            border: "none",
+            background: retrying ? "#93C5FD" : "#2563EB",
+            color: "#fff",
+            fontSize: 12.5,
+            fontWeight: 600,
+            fontFamily: "inherit",
+            cursor: retrying ? "wait" : "pointer",
+          }}
+        >
+          {retrying ? "检测中…" : "重新检测"}
+        </button>
+        <span style={{ fontSize: 12, color: "#94A3B8" }}>
+          服务起来后点「重新检测」即可，不用刷新页面
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/* ========== 主体 ========== */
 export default function AgentSettings() {
   const { role } = useAuth();
   const allowed = canManageAgent(role);
 
   const [tab, setTab] = useState<TabKey>("overview");
   const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState("");
+  // 失败原因用结构化对象保存：标题、说明、要执行的命令分开存，
+  // 这样「服务没起」能渲染成排障卡，其它错误只当一行提示，不至于全糊成一串字
+  const [failure, setFailure] = useState<AgentFailure | null>(null);
 
   const [health, setHealth] = useState<AgentHealth | null>(null);
   const [healthError, setHealthError] = useState("");
@@ -225,7 +366,7 @@ export default function AgentSettings() {
   /* ---------- 加载 ---------- */
   const load = useCallback(async () => {
     setLoading(true);
-    setLoadError("");
+    setFailure(null);
 
     // 健康检查是公开接口：即使没有配置权限，也能看出服务是否活着
     try {
@@ -233,9 +374,12 @@ export default function AgentSettings() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setHealth((await res.json()) as AgentHealth);
       setHealthError("");
-    } catch {
+    } catch (err) {
       setHealth(null);
-      setHealthError("Agent 服务不可达（127.0.0.1:3200）");
+      // 代理层连不上 3200 时回 502；fetch 自己抛错也归到这里
+      setHealthError("127.0.0.1:3200 没有响应");
+      const status = Number((err instanceof Error ? err.message : "").match(/(\d{3})/)?.[1]);
+      setFailure(classifyAgentFailure(Number.isFinite(status) && status ? status : undefined));
     }
 
     try {
@@ -245,17 +389,21 @@ export default function AgentSettings() {
       ]);
 
       if (configRes.status === 403) {
-        setLoadError("当前账号没有 Agent 配置权限，请用系统管理员账号登录。");
+        setFailure(
+          classifyAgentFailure(403, "当前账号没有 Agent 配置权限，请用系统管理员账号登录。"),
+        );
         setConfig(null);
       } else if (!configRes.ok) {
-        throw new Error(`配置读取失败（HTTP ${configRes.status}）`);
+        setFailure(classifyAgentFailure(configRes.status));
+        setConfig(null);
       } else {
         applyConfig((await configRes.json()) as AgentConfigView);
+        setFailure(null);
       }
 
       if (metricsRes.ok) setMetrics((await metricsRes.json()) as MetricsOverview);
     } catch (err) {
-      setLoadError(err instanceof Error ? err.message : "加载失败");
+      setFailure(classifyAgentFailure(undefined, err instanceof Error ? err.message : undefined));
     } finally {
       setLoading(false);
     }
@@ -280,7 +428,8 @@ export default function AgentSettings() {
           ok: false,
           model: data.model ?? modelName ?? "—",
           latency_ms: 0,
-          message: data.detail ?? `HTTP ${res.status}`,
+          // 502 之类统一走同一条判定，别在卡片里露出一句「HTTP 502」
+          message: classifyAgentFailure(res.status, data.detail).title,
         });
       } else {
         setProbe(data);
@@ -290,7 +439,7 @@ export default function AgentSettings() {
         ok: false,
         model: modelName || "—",
         latency_ms: 0,
-        message: err instanceof Error ? err.message : "请求失败",
+        message: classifyAgentFailure(undefined, err instanceof Error ? err.message : undefined).title,
       });
     } finally {
       setProbing(false);
@@ -392,6 +541,8 @@ export default function AgentSettings() {
 
   const toolRows = config?.tools ?? [];
   const stats = config?.stats;
+  // 服务不可达时指标一律显示「—」：这时候拿不到数据，显示 0 会被误读成「今天没人用」
+  const offline = isOffline(failure);
   const today = metrics?.today;
   const yesterday = metrics?.yesterday;
   const callDelta = today && yesterday ? today.calls - yesterday.calls : 0;
@@ -443,12 +594,19 @@ export default function AgentSettings() {
           </div>
         </div>
 
-        {/* ====== 提示条 ====== */}
-        {loadError && (
-          <div style={{ ...CARD, borderColor: "#FECACA", background: "#FEF2F2", padding: "12px 16px", marginBottom: 16, fontSize: 13, color: "#B91C1C" }}>
-            {loadError}
-          </div>
-        )}
+        {/* ====== 失败提示 ====== */}
+        {/* 服务没起 → 整块排障卡；其它错误（权限 / 内部错）→ 一行红条就够了 */}
+        {failure &&
+          (isOffline(failure) ? (
+            <ServiceDownCard failure={failure} retrying={loading} onRetry={() => void load()} />
+          ) : (
+            <div style={{ ...CARD, borderColor: "#FECACA", background: "#FEF2F2", padding: "12px 16px", marginBottom: 16 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: "#B91C1C" }}>{failure.title}</div>
+              <div style={{ fontSize: 12.5, color: "#7F1D1D", marginTop: 3, lineHeight: 1.6 }}>
+                {failure.detail}
+              </div>
+            </div>
+          ))}
         {toast && (
           <div
             style={{
@@ -541,11 +699,13 @@ export default function AgentSettings() {
                   )
                 }
                 hint={
-                  probe?.ok
-                    ? `${probe.model} · 返回「${(probe.reply ?? "").trim() || "pong"}」 · ${formatTime(probe.checked_at ?? "")}`
-                    : probe
-                      ? probe.message
-                      : `当前模型 ${health?.model ?? "—"}，点击下方按钮发一次最小请求`
+                  offline
+                    ? healthError
+                    : probe?.ok
+                      ? `${probe.model} · 返回「${(probe.reply ?? "").trim() || "pong"}」 · ${formatTime(probe.checked_at ?? "")}`
+                      : probe
+                        ? probe.message
+                        : `当前模型 ${health?.model ?? "—"}，点击下方按钮发一次最小请求`
                 }
                 extra={
                   <button
@@ -571,11 +731,13 @@ export default function AgentSettings() {
               />
               <StatCard
                 label="今日调用次数"
-                value={`${formatNumber(today?.calls ?? 0)} 次`}
+                value={offline ? "—" : `${formatNumber(today?.calls ?? 0)} 次`}
                 hint={
-                  today && yesterday
-                    ? `较昨日 ${callDelta >= 0 ? "+" : ""}${callDelta} 次 · 覆盖 ${today.threads} 个会话`
-                    : "按 /chat 请求计数，含审批后的继续执行"
+                  offline
+                    ? healthError
+                    : today && yesterday
+                      ? `较昨日 ${callDelta >= 0 ? "+" : ""}${callDelta} 次 · 覆盖 ${today.threads} 个会话`
+                      : "按 /chat 请求计数，含审批后的继续执行"
                 }
                 icon={
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="15" height="15" strokeLinecap="round" strokeLinejoin="round">
@@ -597,11 +759,13 @@ export default function AgentSettings() {
               <StatCard
                 label="工具调用次数"
                 accent="#EA580C"
-                value={`${formatNumber(today?.tool_calls ?? 0)} 次`}
+                value={offline ? "—" : `${formatNumber(today?.tool_calls ?? 0)} 次`}
                 hint={
-                  today && yesterday
-                    ? `较昨日 ${toolDelta >= 0 ? "+" : ""}${toolDelta} 次 · 今日失败 ${today.errors} 轮`
-                    : "本轮实际发起的工具调用个数"
+                  offline
+                    ? healthError
+                    : today && yesterday
+                      ? `较昨日 ${toolDelta >= 0 ? "+" : ""}${toolDelta} 次 · 今日失败 ${today.errors} 轮`
+                      : "本轮实际发起的工具调用个数"
                 }
                 icon={
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="15" height="15" strokeLinecap="round" strokeLinejoin="round">
@@ -613,8 +777,12 @@ export default function AgentSettings() {
               <StatCard
                 label="Token 消耗量"
                 accent="#DB2777"
-                value={formatTokens(today?.total_tokens ?? 0)}
-                hint={`输入 ${formatTokens(today?.prompt_tokens ?? 0)} · 输出 ${formatTokens(today?.completion_tokens ?? 0)}`}
+                value={offline ? "—" : formatTokens(today?.total_tokens ?? 0)}
+                hint={
+                  offline
+                    ? healthError
+                    : `输入 ${formatTokens(today?.prompt_tokens ?? 0)} · 输出 ${formatTokens(today?.completion_tokens ?? 0)}`
+                }
                 icon={
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="15" height="15" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M12 2 2 7l10 5 10-5-10-5z" /><path d="M2 17l10 5 10-5" /><path d="M2 12l10 5 10-5" />
@@ -629,7 +797,7 @@ export default function AgentSettings() {
                 <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 16 }}>
                   <span style={{ fontSize: 14, fontWeight: 600, color: "#0F172A" }}>近 7 日调用趋势</span>
                   <span style={{ fontSize: 12, color: "#94A3B8" }}>
-                    合计 {formatNumber((metrics?.trend ?? []).reduce((sum, item) => sum + item.calls, 0))} 次
+                    合计 {offline ? "—" : formatNumber((metrics?.trend ?? []).reduce((sum, item) => sum + item.calls, 0))} 次
                   </span>
                 </div>
                 {(() => {
@@ -676,7 +844,11 @@ export default function AgentSettings() {
                 {(() => {
                   const rows = metrics?.top_tools ?? [];
                   if (!rows.length) {
-                    return <div style={{ fontSize: 12.5, color: "#94A3B8", padding: "18px 0" }}>还没有工具调用记录</div>;
+                    return (
+                      <div style={{ fontSize: 12.5, color: "#94A3B8", padding: "18px 0" }}>
+                        {offline ? "服务未启动，暂时读不到调用记录" : "还没有工具调用记录"}
+                      </div>
+                    );
                   }
                   const max = Math.max(1, ...rows.map((item) => item.count));
                   const labelOf = (name: string) => toolRows.find((tool) => tool.name === name)?.label ?? name;
@@ -707,8 +879,23 @@ export default function AgentSettings() {
           </div>
         )}
 
+        {/* 配置没读到时不渲染编辑区：空白的提示词框会让人以为「提示词是空的」，
+            然后照着改、保存，实际上什么都没写进去 */}
+        {tab !== "overview" && !config && !loading && (
+          <div style={{ ...CARD, padding: 24, lineHeight: 1.8 }}>
+            <div style={{ fontSize: 14, fontWeight: 600, color: "#B91C1C", marginBottom: 6 }}>
+              配置未加载
+            </div>
+            <div style={{ fontSize: 13, color: "#64748B" }}>
+              {failure
+                ? `${failure.title}。${failure.detail}`
+                : "暂时读不到 Agent 配置，点右上角「刷新」重试。"}
+            </div>
+          </div>
+        )}
+
         {/* ================= 系统提示词 ================= */}
-        {tab === "prompt" && (
+        {tab === "prompt" && config && (
           <div style={{ ...CARD, padding: 20 }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 14, flexWrap: "wrap" }}>
               <div>
@@ -796,7 +983,7 @@ export default function AgentSettings() {
         )}
 
         {/* ================= 工具与权限 ================= */}
-        {tab === "tools" && (
+        {tab === "tools" && config && (
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
               {stats && (

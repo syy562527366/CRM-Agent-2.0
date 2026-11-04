@@ -103,8 +103,14 @@ async function handle(request: NextRequest, { params }: { params: Params }) {  c
   try {
     upstream = await fetch(target, { method, headers, body, cache: "no-store" });
   } catch {
+    // 502 是留个「传输层失败」的准确语义，附带 code / hint 供前端做可读提示：
+    // 光看 HTTP 502 分不清是没登录、没权限，还是后端进程根本没开。
     return NextResponse.json(
-      { error: "Agent 服务未启动或不可达（默认 127.0.0.1:3200）" },
+      {
+        error: "Agent 服务未启动或不可达（默认 127.0.0.1:3200）",
+        code: "AGENT_UNAVAILABLE",
+        hint: "在项目根目录双击 start-all.cmd，或执行：cd agent && .venv\\Scripts\\python.exe app.py",
+      },
       { status: 502 },
     );
   }

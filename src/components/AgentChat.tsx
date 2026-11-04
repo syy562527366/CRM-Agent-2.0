@@ -13,6 +13,7 @@ import ApprovalCard, {
   type ApprovalDecision,
   type ApprovalPayload,
 } from "./chat/ApprovalCard";
+import { classifyAgentFailure, failureToMarkdown } from "@/lib/agent/errors";
 
 /* ========== 类型 ========== */
 
@@ -108,24 +109,11 @@ const SUGGESTIONS = [
 /**
  * 把 HTTP 状态翻成可执行的中文提示。
  *
- * 502/503 几乎只有一个原因：3200 的 Agent 进程没在跑（代理转发失败），
- * 所以文案直接给出启动命令，而不是让用户去猜「服务返回 502」是什么意思。
+ * 判定逻辑收在 `lib/agent/errors` 里，控制面板用的是同一套文案，
+ * 避免两个页面各说一套、或者一处改了另一处还写着「HTTP 502」。
  */
-function explainStatus(status: number): string {
-  if (status === 502 || status === 503 || status === 504) {
-    return (
-      "Agent 服务没有响应（127.0.0.1:3200 未启动）。\n\n" +
-      "在项目根目录双击 `start-all.cmd`，或手动执行：\n\n" +
-      "```bash\ncd agent && ./.venv/Scripts/python.exe app.py\n```"
-    );
-  }
-  if (status === 401) {
-    return "登录状态已失效，请刷新页面重新登录 CRM 后再试。";
-  }
-  if (status === 403) {
-    return "当前账号没有使用 AI 助手的权限，请联系管理员开通「AI 助手」页面权限。";
-  }
-  return `Agent 服务返回 ${status}，请查看 agent 终端日志排查。`;
+function explainStatus(status?: number, message?: string): string {
+  return failureToMarkdown(classifyAgentFailure(status, message));
 }
 
 function nowTime(): string {
@@ -525,12 +513,11 @@ export default function AgentChat() {
           });
         } else {
           const detail = err instanceof Error ? err.message : String(err);
-          // "服务返回 502" 这类原始状态码对用户没有意义，换成可执行的建议
+          // "服务返回 502" 这类原始状态码对用户没有意义，换成可执行的建议。
+          // 提不到状态码（fetch 直接抛错）同样按「服务不可达」处理。
           const status = Number(detail.match(/服务返回 (\d{3})/)?.[1] ?? 0);
           patchMessage(agentMsg.id, {
-            content: status
-              ? explainStatus(status)
-              : `无法连接 Agent 服务：${detail}\n\n请确认服务已启动（127.0.0.1:3200）。`,
+            content: explainStatus(status || undefined, detail),
             error: true,
           });
         }
@@ -610,11 +597,8 @@ export default function AgentChat() {
         const detail = err instanceof Error ? err.message : String(err);
         const status = Number(detail.match(/服务返回 (\d{3})/)?.[1] ?? 0);
         patchMessage(messageId, {
-          content:
-            last.current ||
-            (status
-              ? explainStatus(status)
-              : `审批提交失败：${detail}\n\n请确认 Agent 服务已启动（127.0.0.1:3200）。`),
+          // 审批提交失败也别只说「失败」：状态码提取不到时按服务不可达给指引
+          content: last.current || explainStatus(status || undefined, detail),
           error: !last.current,
         });
         if (!accepted) {
