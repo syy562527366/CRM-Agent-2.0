@@ -478,6 +478,10 @@ export default function OrdersDashboard() {
             <FormField label="下单商品">
               <select value={editForm.productId} onChange={(e) => handleEditProductChange(e.target.value)} style={SELECT_STYLE}>
                 <option value="">请选择商品</option>
+                {/* 商品下架后不在可选列表里，这里补回当前订单引用的那个，避免表单被清空 */}
+                {editForm.productId && !formOptions.products.some((p) => p.id === editForm.productId) && (
+                  <option value={editForm.productId}>{editOrder.productName}（已下架）</option>
+                )}
                 {formOptions.products.map((p) => (
                   <option key={p.id} value={p.id}>{p.name} - {formatPrice(p.price)}</option>
                 ))}

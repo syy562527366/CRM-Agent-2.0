@@ -2,7 +2,12 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { usePermission } from "@/hooks/usePermission";
-import type { Product, ProductListResponse, CreateProductRequest } from "@/types/product";
+import {
+  PRODUCT_CATEGORIES,
+  type Product,
+  type ProductListResponse,
+  type CreateProductRequest,
+} from "@/types/product";
 import Sidebar from "./Sidebar";
 import Drawer from "./Drawer";
 import Modal from "./Modal";
@@ -21,6 +26,21 @@ const INPUT_STYLE: React.CSSProperties = {
   width: "100%",
   boxSizing: "border-box",
 };
+
+/* ========== 展示辅助 ========== */
+
+/** 价格：0 表示源数据没价格（历史合同未填），显示「待定价」比 ¥0.00 诚实 */
+function formatPrice(value?: number): string {
+  if (!value) return "待定价";
+  return `¥${value.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function priceRange(product: Product): string {
+  if (!product.priceMin && !product.priceMax) return "—";
+  const fmt = (n?: number) =>
+    (n ?? 0).toLocaleString("zh-CN", { maximumFractionDigits: 2 });
+  return `${fmt(product.priceMin)} ~ ${fmt(product.priceMax)}`;
+}
 
 /* ========== 表单行组件 ========== */
 function FormField({ label, children }: { label: string; children: React.ReactNode }) {
@@ -58,6 +78,9 @@ export default function ProductsDashboard() {
     ...defaultDateRange(),
     productNo: "",
     name: "",
+    category: "",
+    // 默认只看上架：下架的多为历史演示数据，混在列表里会干扰选品
+    status: "上架",
   });
 
   // ---- 抽屉 & 弹窗 ----
@@ -67,8 +90,21 @@ export default function ProductsDashboard() {
   const [showAddModal, setShowAddModal] = useState(false);
 
   // ---- 编辑表单数据 ----
-  const [editForm, setEditForm] = useState({ productNo: "", name: "", price: 0 });
-  const [addForm, setAddForm] = useState<CreateProductRequest>({ productNo: "", name: "", price: 0 });
+  const [editForm, setEditForm] = useState({
+    productNo: "",
+    name: "",
+    price: 0,
+    category: "",
+    unit: "",
+    status: "上架" as "上架" | "下架",
+  });
+  const [addForm, setAddForm] = useState<CreateProductRequest>({
+    productNo: "",
+    name: "",
+    price: 0,
+    category: "",
+    unit: "",
+  });
 
   // ---- 数据加载 ----
   const fetchProducts = useCallback(async () => {
@@ -79,6 +115,8 @@ export default function ProductsDashboard() {
       if (filters.endDate) params.set("endDate", filters.endDate);
       if (filters.productNo) params.set("productNo", filters.productNo);
       if (filters.name) params.set("name", filters.name);
+      if (filters.category) params.set("category", filters.category);
+      if (filters.status) params.set("status", filters.status);
       params.set("page", String(page));
       params.set("pageSize", String(pageSize));
 
@@ -114,14 +152,22 @@ export default function ProductsDashboard() {
 
   // ---- 编辑 ----
   const openEdit = async (product: Product) => {
+    const fill = (data: Product) => {
+      setEditProduct(data);
+      setEditForm({
+        productNo: data.productNo,
+        name: data.name,
+        price: data.price,
+        category: data.category ?? "",
+        unit: data.unit ?? "",
+        status: data.status ?? "上架",
+      });
+    };
     try {
       const res = await fetch(`/api/products/${product.id}`);
-      const data: Product = await res.json();
-      setEditProduct(data);
-      setEditForm({ productNo: data.productNo, name: data.name, price: data.price });
+      fill((await res.json()) as Product);
     } catch {
-      setEditProduct(product);
-      setEditForm({ productNo: product.productNo, name: product.name, price: product.price });
+      fill(product);
     }
   };
 
@@ -161,7 +207,7 @@ export default function ProductsDashboard() {
       body: JSON.stringify(addForm),
     });
     setShowAddModal(false);
-    setAddForm({ productNo: "", name: "", price: 0 });
+    setAddForm({ productNo: "", name: "", price: 0, category: "", unit: "" });
     setPage(1);
     fetchProducts();
   };
@@ -174,7 +220,7 @@ export default function ProductsDashboard() {
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 24 }}>
           <div>
             <h1 style={{ fontSize: 24, fontWeight: 700, color: "#0F172A", letterSpacing: "-0.02em", margin: 0 }}>商品管理</h1>
-            <p style={{ fontSize: 13, color: "#64748B", marginTop: 4, margin: 0 }}>管理所有在售商品信息，支持新增、修改和删除操作</p>
+            <p style={{ fontSize: 13, color: "#64748B", marginTop: 4, margin: 0 }}>商品目录来自 2022-2026 合同汇总：编号、类别、单位、参考价与成交情况，支持新增、修改和删除</p>
           </div>
           {perm.canAdd && (
             <button
@@ -212,6 +258,27 @@ export default function ProductsDashboard() {
             <input type="text" value={filters.name} onChange={(e) => handleFilterChange("name", e.target.value)} placeholder="请输入商品名称" style={{ padding: "7px 10px", border: "1px solid #E2E8F0", borderRadius: 8, fontSize: 13, fontFamily: "inherit", color: "#1E293B", background: "#fff", outline: "none", minWidth: 120, width: 130 }} />
           </div>
 
+          {/* 类别 */}
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ fontSize: "12.5px", fontWeight: 500, color: "#64748B", whiteSpace: "nowrap" }}>类别</span>
+            <select value={filters.category} onChange={(e) => handleFilterChange("category", e.target.value)} style={{ padding: "7px 10px", border: "1px solid #E2E8F0", borderRadius: 8, fontSize: 13, fontFamily: "inherit", color: filters.category ? "#1E293B" : "#94A3B8", background: "#fff", outline: "none", width: 130 }}>
+              <option value="">全部</option>
+              {PRODUCT_CATEGORIES.map((item) => (
+                <option key={item} value={item}>{item}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* 状态 */}
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ fontSize: "12.5px", fontWeight: 500, color: "#64748B", whiteSpace: "nowrap" }}>状态</span>
+            <select value={filters.status} onChange={(e) => handleFilterChange("status", e.target.value)} style={{ padding: "7px 10px", border: "1px solid #E2E8F0", borderRadius: 8, fontSize: 13, fontFamily: "inherit", color: "#1E293B", background: "#fff", outline: "none", width: 96 }}>
+              <option value="">全部</option>
+              <option value="上架">上架</option>
+              <option value="下架">下架</option>
+            </select>
+          </div>
+
           <div style={{ display: "flex", alignItems: "center" }}>
             <button onClick={fetchProducts} style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "7px 14px", borderRadius: 8, fontWeight: 600, fontSize: "12.5px", border: "none", cursor: "pointer", fontFamily: "inherit", lineHeight: 1, background: "#2563EB", color: "#fff", margin: 0 }}>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16" strokeLinecap="round" strokeLinejoin="round">
@@ -238,9 +305,11 @@ export default function ProductsDashboard() {
                       <label htmlFor="selectAllHeader" style={{ width: 16, height: 16, border: "2px solid #CBD5E1", borderRadius: 4, display: "inline-block", cursor: "pointer", position: "relative", margin: 0 }} />
                     </th>
                     <th style={{ padding: "10px 16px", textAlign: "left", fontSize: "11.5px", fontWeight: 600, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.04em", whiteSpace: "nowrap", userSelect: "none" }}>商品编号</th>
-                    <th style={{ padding: "10px 16px", textAlign: "left", fontSize: "11.5px", fontWeight: 600, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.04em", whiteSpace: "nowrap", userSelect: "none" }}>创建时间</th>
                     <th style={{ padding: "10px 16px", textAlign: "left", fontSize: "11.5px", fontWeight: 600, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.04em", whiteSpace: "nowrap", userSelect: "none" }}>商品名称</th>
-                    <th style={{ padding: "10px 16px", textAlign: "left", fontSize: "11.5px", fontWeight: 600, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.04em", whiteSpace: "nowrap", userSelect: "none" }}>商品价格</th>
+                    <th style={{ padding: "10px 16px", textAlign: "left", fontSize: "11.5px", fontWeight: 600, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.04em", whiteSpace: "nowrap", userSelect: "none" }}>类别</th>
+                    <th style={{ padding: "10px 16px", textAlign: "right", fontSize: "11.5px", fontWeight: 600, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.04em", whiteSpace: "nowrap", userSelect: "none" }}>参考价</th>
+                    <th style={{ padding: "10px 16px", textAlign: "right", fontSize: "11.5px", fontWeight: 600, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.04em", whiteSpace: "nowrap", userSelect: "none" }}>成交</th>
+                    <th style={{ padding: "10px 16px", textAlign: "left", fontSize: "11.5px", fontWeight: 600, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.04em", whiteSpace: "nowrap", userSelect: "none" }}>状态</th>
                     <th style={{ padding: "10px 16px", textAlign: "right", paddingRight: 20, fontSize: "11.5px", fontWeight: 600, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.04em", whiteSpace: "nowrap", userSelect: "none" }}>操作</th>
                   </tr>
                 </thead>
@@ -253,10 +322,54 @@ export default function ProductsDashboard() {
                         <input type="checkbox" id={`row-${product.id}`} style={{ display: "none" }} />
                         <label htmlFor={`row-${product.id}`} style={{ width: 16, height: 16, border: "2px solid #CBD5E1", borderRadius: 4, display: "inline-block", cursor: "pointer", position: "relative", margin: 0 }} />
                       </td>
-                      <td style={{ padding: "12px 16px" }}><span onClick={() => openDetail(product)} title="查看详情" style={{ fontWeight: 600, color: "#2563EB", fontSize: 13, cursor: "pointer" }}>{product.id}</span></td>
-                      <td style={{ padding: "12px 16px", color: "#64748B", fontSize: 13, whiteSpace: "nowrap" }}>{product.createdAt}</td>
-                      <td style={{ padding: "12px 16px", fontWeight: 600, fontSize: 13 }}>{product.name}</td>
-                      <td style={{ padding: "12px 16px", color: "#059669", fontWeight: 600, fontSize: 13 }}>¥{product.price.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                      <td style={{ padding: "12px 16px" }}><span onClick={() => openDetail(product)} title="查看详情" style={{ fontWeight: 600, color: "#2563EB", fontSize: 13, cursor: "pointer", whiteSpace: "nowrap" }}>{product.id}</span></td>
+                      <td style={{ padding: "12px 16px" }}>
+                        <div style={{ fontWeight: 600, fontSize: 13, color: "#1E293B" }}>{product.name}</div>
+                        <div style={{ fontSize: 11.5, color: "#94A3B8", fontFamily: "ui-monospace, monospace", marginTop: 2 }}>
+                          {product.productNo}
+                          {product.unit ? ` · ${product.unit}` : ""}
+                        </div>
+                      </td>
+                      <td style={{ padding: "12px 16px", whiteSpace: "nowrap" }}>
+                        {product.category ? (
+                          <span style={{ fontSize: 11.5, fontWeight: 500, padding: "3px 8px", borderRadius: 6, background: "#F1F5F9", color: "#475569" }}>
+                            {product.category}
+                          </span>
+                        ) : (
+                          <span style={{ fontSize: 12, color: "#CBD5E1" }}>—</span>
+                        )}
+                      </td>
+                      <td style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }}>
+                        <span style={{ color: product.price ? "#059669" : "#94A3B8", fontWeight: 600, fontSize: 13 }}>
+                          {formatPrice(product.price)}
+                        </span>
+                      </td>
+                      <td style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }}>
+                        {product.dealCount ? (
+                          <>
+                            <div style={{ fontSize: 13, fontWeight: 600, color: "#1E293B" }}>{product.dealCount} 单</div>
+                            <div style={{ fontSize: 11, color: "#94A3B8" }}>最近 {product.lastDealAt || "—"}</div>
+                          </>
+                        ) : (
+                          <span style={{ fontSize: 12, color: "#CBD5E1" }}>—</span>
+                        )}
+                      </td>
+                      <td style={{ padding: "12px 16px" }}>
+                        <span
+                          style={{
+                            fontSize: 11.5,
+                            fontWeight: 600,
+                            padding: "3px 9px",
+                            borderRadius: 999,
+                            whiteSpace: "nowrap",
+                            background: (product.status ?? "上架") === "上架" ? "#F0FDF4" : "#F1F5F9",
+                            color: (product.status ?? "上架") === "上架" ? "#15803D" : "#64748B",
+                            border: `1px solid ${(product.status ?? "上架") === "上架" ? "#BBF7D0" : "#E2E8F0"}`,
+                          }}
+                        >
+                          {product.status ?? "上架"}
+                        </span>
+                      </td>
                       <td style={{ padding: "12px 16px", textAlign: "right", paddingRight: 20 }}>
                         <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 6 }}>
                           {perm.canView && (
@@ -331,10 +444,28 @@ export default function ProductsDashboard() {
         {detailProduct && (
           <div>
             <DetailRow label="商品编号" value={detailProduct.id} />
-            <DetailRow label="创建时间" value={detailProduct.createdAt} />
-            <DetailRow label="产品编号" value={detailProduct.productNo} />
+            <DetailRow label="产品编号" value={detailProduct.productNo || "—"} />
             <DetailRow label="商品名称" value={detailProduct.name} />
-            <DetailRow label="商品价格" value={`¥${detailProduct.price.toLocaleString("zh-CN", { minimumFractionDigits: 2 })}`} />
+            <DetailRow label="类别" value={detailProduct.category || "—"} />
+            <DetailRow label="单位" value={detailProduct.unit || "—"} />
+            <DetailRow label="参考价" value={formatPrice(detailProduct.price)} />
+            <DetailRow label="历史价格区间" value={priceRange(detailProduct)} />
+            <DetailRow label="成交单数" value={detailProduct.dealCount ? `${detailProduct.dealCount} 单` : "—"} />
+            <DetailRow
+              label="累计数量"
+              value={detailProduct.totalQty ? `${detailProduct.totalQty.toLocaleString("zh-CN")} ${detailProduct.unit ?? ""}`.trim() : "—"}
+            />
+            <DetailRow
+              label="成交时间"
+              value={
+                detailProduct.firstDealAt
+                  ? `${detailProduct.firstDealAt} ~ ${detailProduct.lastDealAt || detailProduct.firstDealAt}`
+                  : "—"
+              }
+            />
+            <DetailRow label="状态" value={detailProduct.status ?? "上架"} />
+            <DetailRow label="创建时间" value={detailProduct.createdAt} />
+            {detailProduct.note && <DetailRow label="备注" value={detailProduct.note} />}
           </div>
         )}
       </Drawer>
@@ -352,8 +483,37 @@ export default function ProductsDashboard() {
             <FormField label="商品名称">
               <input type="text" value={editForm.name} onChange={(e) => setEditForm((f) => ({ ...f, name: e.target.value }))} style={INPUT_STYLE} placeholder="请输入商品名称" />
             </FormField>
-            <FormField label="商品价格">
-              <input type="number" value={editForm.price} onChange={(e) => setEditForm((f) => ({ ...f, price: parseFloat(e.target.value) || 0 }))} style={INPUT_STYLE} placeholder="请输入商品价格" min="0" step="0.01" />
+            <FormField label="类别">
+              <select
+                value={editForm.category}
+                onChange={(e) => setEditForm((f) => ({ ...f, category: e.target.value }))}
+                style={INPUT_STYLE}
+              >
+                <option value="">未分类</option>
+                {/* 老数据里可能有列表外的类别，保留下来避免编辑时被清空 */}
+                {editForm.category && !(PRODUCT_CATEGORIES as readonly string[]).includes(editForm.category) && (
+                  <option value={editForm.category}>{editForm.category}</option>
+                )}
+                {PRODUCT_CATEGORIES.map((item) => (
+                  <option key={item} value={item}>{item}</option>
+                ))}
+              </select>
+            </FormField>
+            <FormField label="单位">
+              <input type="text" value={editForm.unit} onChange={(e) => setEditForm((f) => ({ ...f, unit: e.target.value }))} style={INPUT_STYLE} placeholder="如 个 / 项 / 套" />
+            </FormField>
+            <FormField label="参考价">
+              <input type="number" value={editForm.price} onChange={(e) => setEditForm((f) => ({ ...f, price: parseFloat(e.target.value) || 0 }))} style={INPUT_STYLE} placeholder="0 表示待定价" min="0" step="0.01" />
+            </FormField>
+            <FormField label="状态">
+              <select
+                value={editForm.status}
+                onChange={(e) => setEditForm((f) => ({ ...f, status: e.target.value as "上架" | "下架" }))}
+                style={INPUT_STYLE}
+              >
+                <option value="上架">上架</option>
+                <option value="下架">下架</option>
+              </select>
             </FormField>
             <div style={{ display: "flex", gap: 10, marginTop: 24 }}>
               <button onClick={handleEditSubmit} style={{ flex: 1, padding: "10px 20px", borderRadius: 10, fontWeight: 600, fontSize: "13.5px", border: "none", background: "#2563EB", color: "#fff", cursor: "pointer", fontFamily: "inherit" }}>保存修改</button>
@@ -395,8 +555,19 @@ export default function ProductsDashboard() {
           <FormField label="商品名称">
             <input type="text" value={addForm.name} onChange={(e) => setAddForm((f) => ({ ...f, name: e.target.value }))} style={INPUT_STYLE} placeholder="请输入商品名称" />
           </FormField>
-          <FormField label="商品价格">
-            <input type="number" value={addForm.price || ""} onChange={(e) => setAddForm((f) => ({ ...f, price: parseFloat(e.target.value) || 0 }))} style={INPUT_STYLE} placeholder="请输入商品价格" min="0" step="0.01" />
+          <FormField label="类别">
+            <select value={addForm.category} onChange={(e) => setAddForm((f) => ({ ...f, category: e.target.value }))} style={INPUT_STYLE}>
+              <option value="">未分类</option>
+              {PRODUCT_CATEGORIES.map((item) => (
+                <option key={item} value={item}>{item}</option>
+              ))}
+            </select>
+          </FormField>
+          <FormField label="单位">
+            <input type="text" value={addForm.unit} onChange={(e) => setAddForm((f) => ({ ...f, unit: e.target.value }))} style={INPUT_STYLE} placeholder="如 个 / 项 / 套" />
+          </FormField>
+          <FormField label="参考价">
+            <input type="number" value={addForm.price || ""} onChange={(e) => setAddForm((f) => ({ ...f, price: parseFloat(e.target.value) || 0 }))} style={INPUT_STYLE} placeholder="0 表示待定价" min="0" step="0.01" />
           </FormField>
           <div style={{ display: "flex", gap: 10, marginTop: 24 }}>
             <button onClick={handleAddSubmit} style={{ flex: 1, padding: "10px 20px", borderRadius: 10, fontWeight: 600, fontSize: "13.5px", border: "none", background: "#2563EB", color: "#fff", cursor: "pointer", fontFamily: "inherit" }}>添加</button>

@@ -23,7 +23,7 @@
 |---|---|---|---|
 | 线索 | `data/leads.json` | 35 | id / name / phone / status / priority / source / assignee / intentProduct / budgetRange / lastFollowUpAt / remark / customerPosition / trialDuration / idCard |
 | 订单 | `data/orders.json` | 27 | id / orderNo / customerName / customerPhone / productId / productName / amount / serviceTermMonths |
-| 商品 | `data/products.json` | 4 | id / productNo / name / price |
+| 商品 | `data/products.json` | 25（21 上架 + 4 演示下架） | id / productNo / name / price / category / unit / status / dealCount / priceMin / priceMax / firstDealAt / lastDealAt / note |
 | 沟通记录 | `data/communications.json` | 57 | id / leadId / sentAt / sender / senderRole / content / type / channel |
 | 账号 | `data/accounts.json` | 6 | id / name / phone / roleId / roleName |
 | 角色 | `data/roles.json` | 2 | permissions[pageKey / functions / dataScope] |
@@ -189,7 +189,7 @@ def crm_search_leads(..., user: Annotated[CrmCtx, InjectedToolArg]) -> str
 | `crm_get_lead` | lead_id | 单条线索详情（不含手机号/身份证） | leads.查看 |
 | `crm_get_lead_timeline` | lead_id, limit | 该线索最近沟通记录（时间/渠道/摘要） | communications.查看 |
 | `crm_search_orders` | customer, product, date_from, date_to, min_amount, limit | 订单摘要 + 金额合计 | orders.查看 |
-| `crm_list_products` | 无 | 商品 id / 名称 / 价格 | products.查看 |
+| `crm_list_products` | 无（固定只取上架） | 商品 id / 编号 / 名称 / 类别 / 单位 / 参考价 / 成交单数 | products.查看 |
 | `crm_lead_stats` | group_by(status/source/assignee/priority), date_from, date_to | 分组计数 | leads.查看 |
 | `crm_sales_stats` | period(month/week), group_by(product/assignee) | 成交额、订单数、客单价 | orders.查看 |
 | `crm_update_lead` ✅🔒 | lead_id(编号或姓名), name, phone, source, status, priority, assignee, intent_product, budget_range, customer_position, trial_duration, remark | 变化的字段（旧值 → 新值） | leads.修改（**每次人工审批**） |

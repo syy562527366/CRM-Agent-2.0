@@ -29,12 +29,16 @@ export async function GET(request: NextRequest) {
   if (searchParams.get("options") === "true") {
     const options: OrderFormOptions = {
       leads: readLeads().map((lead) => ({ id: lead.id, name: lead.name, phone: lead.phone })),
-      products: readProducts().map((product) => ({
-        id: product.id,
-        productNo: product.productNo,
-        name: product.name,
-        price: product.price,
-      })),
+      // 只给上架商品：下架的不该出现在新订单里。
+      // 历史订单可能还指着已下架商品，那种情况由订单页自己补一个「已下架」选项。
+      products: readProducts()
+        .filter((product) => (product.status ?? "上架") === "上架")
+        .map((product) => ({
+          id: product.id,
+          productNo: product.productNo,
+          name: product.name,
+          price: product.price,
+        })),
     };
     return NextResponse.json(options);
   }

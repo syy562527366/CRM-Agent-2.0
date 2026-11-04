@@ -1,4 +1,4 @@
-import type { Product } from "@/types/product";
+import type { Product, ProductStatus } from "@/types/product";
 import { nextId, nowStamp, readJson, writeJson } from "./store";
 
 const FILE = "products.json";
@@ -8,6 +8,8 @@ export interface ProductFilter {
   endDate?: string;
   productNo?: string;
   name?: string;
+  category?: string;
+  status?: ProductStatus;
 }
 
 export function readProducts(): Product[] {
@@ -32,11 +34,20 @@ export function searchProducts(filter: ProductFilter = {}): Product[] {
       if (!product.productNo.includes(kw) && !product.id.includes(kw)) return false;
     }
     if (filter.name && !product.name.includes(filter.name.trim())) return false;
+    if (filter.category && product.category !== filter.category) return false;
+    // 没写 status 的老数据按「上架」算，避免导入前的商品被莫名归为下架
+    if (filter.status && (product.status ?? "上架") !== filter.status) return false;
     return true;
   });
 }
 
-export function createProduct(input: { productNo: string; name: string; price: number }): Product {
+export function createProduct(input: {
+  productNo: string;
+  name: string;
+  price: number;
+  category?: string;
+  unit?: string;
+}): Product {
   const products = readProducts();
   const product: Product = {
     id: nextId(products, "PD-2026-"),
@@ -44,7 +55,10 @@ export function createProduct(input: { productNo: string; name: string; price: n
     productNo: input.productNo.trim(),
     name: input.name.trim(),
     price: input.price,
+    status: "上架",
   };
+  if (input.category) product.category = input.category.trim();
+  if (input.unit) product.unit = input.unit.trim();
   products.unshift(product);
   writeProducts(products);
   return product;

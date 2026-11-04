@@ -12,6 +12,8 @@ import { paginate } from "@/lib/crm/store";
  *   endDate    - 结束日期 (YYYY-MM-DD)
  *   productNo  - 商品编号模糊搜索
  *   name       - 商品名称模糊搜索
+ *   category   - 类别精确筛选（CBAM 合规 / 碳核算核查 / …）
+ *   status     - 上架 / 下架，不传表示全部
  *   page       - 页码（默认 1）
  *   pageSize   - 每页条数（默认 5）
  */
@@ -20,12 +22,15 @@ export async function GET(request: NextRequest) {
   if (!auth.ok) return auth.response;
 
   const { searchParams } = new URL(request.url);
+  const status = searchParams.get("status");
 
   const rows = searchProducts({
     startDate: searchParams.get("startDate") ?? undefined,
     endDate: searchParams.get("endDate") ?? undefined,
     productNo: searchParams.get("productNo") ?? undefined,
     name: searchParams.get("name") ?? undefined,
+    category: searchParams.get("category") ?? undefined,
+    status: status === "上架" || status === "下架" ? status : undefined,
   });
 
   const paged = paginate(rows, Number(searchParams.get("page") ?? 1), Number(searchParams.get("pageSize") ?? 5));
@@ -56,6 +61,8 @@ export async function POST(request: NextRequest) {
       productNo: body.productNo,
       name: body.name,
       price: body.price,
+      category: body.category,
+      unit: body.unit,
     });
 
     return NextResponse.json(product, { status: 201 });

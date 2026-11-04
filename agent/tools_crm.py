@@ -377,13 +377,16 @@ def crm_search_orders(
 
 @tool
 def crm_list_products(config: RunnableConfig = None) -> str:
-    """列出在售商品及价格。用于回答「有哪些课程 / 单价多少」。无参数。"""
+    """列出在售商品（类别、单位、参考价、历史成交单数）。用于回答「有哪些服务 / 单价多少」。无参数。"""
     ctx, denied = _guard(config, "products")
     if denied:
         return dump(denied)
 
     with CrmClient(ctx) as client:
-        result = client.list("/api/products", {"page": 1, "pageSize": MAX_LIMIT})
+        # 只要上架商品：下架的是历史演示数据，不该出现在「在售清单」里
+        result = client.list(
+            "/api/products", {"page": 1, "pageSize": MAX_LIMIT, "status": "上架"}
+        )
 
     if not result["ok"]:
         return dump(fail(result["error"], result["message"]))
@@ -393,7 +396,10 @@ def crm_list_products(config: RunnableConfig = None) -> str:
             "id": row.get("id", ""),
             "productNo": row.get("productNo", ""),
             "name": row.get("name", ""),
+            "category": row.get("category", ""),
+            "unit": row.get("unit", ""),
             "price": row.get("price", 0),
+            "dealCount": row.get("dealCount", 0),
         }
         for row in result["items"]
     ]
