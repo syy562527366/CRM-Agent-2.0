@@ -192,10 +192,10 @@ def crm_search_leads(..., user: Annotated[CrmCtx, InjectedToolArg]) -> str
 | `crm_list_products` | 无 | 商品 id / 名称 / 价格 | products.查看 |
 | `crm_lead_stats` | group_by(status/source/assignee/priority), date_from, date_to | 分组计数 | leads.查看 |
 | `crm_sales_stats` | period(month/week), group_by(product/assignee) | 成交额、订单数、客单价 | orders.查看 |
-| `crm_update_lead` ✅ | lead_id(编号或姓名), status, priority, assignee, intent_product, budget_range, customer_position, trial_duration, remark | 变化的字段（旧值 → 新值） | leads.修改 |
-| `crm_update_order` ✅ | order_key, amount | 金额变化 | orders.修改 |
-| `crm_delete_lead` ✅ | lead_id, reason | 被删记录摘要（已留底） | leads.删除 |
-| `crm_delete_order` ✅ | order_key, reason | 被删记录摘要（已留底） | orders.删除 |
+| `crm_update_lead` ✅🔒 | lead_id(编号或姓名), name, phone, source, status, priority, assignee, intent_product, budget_range, customer_position, trial_duration, remark | 变化的字段（旧值 → 新值） | leads.修改（**每次人工审批**） |
+| `crm_update_order` ✅🔒 | order_key, amount | 金额变化 | orders.修改（**每次人工审批**） |
+| `crm_delete_lead` ❌ | lead_id, reason | 入口返回 `FORBIDDEN`，**不注册给模型** | leads.删除（Agent 一律拒绝） |
+| `crm_delete_order` ❌ | order_key, reason | 同上 | orders.删除（Agent 一律拒绝） |
 | ⬜ `crm_create_lead` | name, phone, source, priority, assignee | 新线索 id | leads.增加 |
 | ⬜ `crm_add_communication` | lead_id, channel, content | 记录 id | communications.增加（**API 尚不支持 POST，需先补**） |
 

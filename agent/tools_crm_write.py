@@ -1,5 +1,9 @@
 """CRM 写操作工具集：修改数据 / 删除数据。
 
+**当前 Agent 只开放「修改」，不开放「删除」**：`AGENT_DELETE_ENABLED = False`，
+删除工具既不会注册给模型（见 `app.py` 的 `TOOLS`），即使被别处重新注册，
+函数入口也会直接返回 `FORBIDDEN` 并写审计，形成双重拦截。
+
 与只读工具同一套纪律，另加三条写操作专属约束：
 
 1. **白名单补丁**：只有列在 `_LEAD_PATCH` / `_ORDER_PATCH` 里的字段能改。
@@ -33,6 +37,16 @@ AUDIT_PATH = _DATA_DIR / "audit.jsonl"
 TRASH_PATH = _DATA_DIR / "trash.jsonl"
 
 _io_lock = threading.Lock()
+
+# 删除开关：产品要求「Agent 不得删除任何数据」，删除只在 CRM 页面由人工完成。
+# 这里保留实现（留底逻辑仍可用），但入口一律拒绝。
+AGENT_DELETE_ENABLED = False
+
+_DELETE_FORBIDDEN_MESSAGE = (
+    "Agent 不提供删除能力：删除动作不可逆，只能由用户在 CRM 列表页手动完成。"
+    "请如实告诉用户「我不能删除数据，请在对应列表里自行删除」，"
+    "不要改用修改工具变相达成删除效果"
+)
 
 # 可修改字段白名单（CRM 字段名 → 中文标签）
 # 与 CRM「修改线索」抽屉保持一致：姓名 / 电话 / 优先级 / 来源 / 跟进人 + 业务属性。
@@ -467,6 +481,10 @@ def crm_delete_lead(lead_id: str, reason: str = "", config: RunnableConfig = Non
         lead_id: 线索编号（LD-2026-0001）。可传客户姓名，但仅当只匹配到一条时才执行。
         reason: 删除原因，会记进审计日志，便于事后追溯。例如「重复录入」。
     """
+    if not AGENT_DELETE_ENABLED:
+        _audit(_ctx(config), "crm_delete_lead", "delete", str(lead_id), success=False, error="FORBIDDEN")
+        return dump(fail("FORBIDDEN", _DELETE_FORBIDDEN_MESSAGE))
+
     ctx, denied = _guard_write(config, "leads", "删除")
     if denied:
         return dump(denied)
@@ -521,6 +539,10 @@ def crm_delete_order(order_key: str, reason: str = "", config: RunnableConfig = 
         order_key: 订单号，例如 OD-2026-0001。
         reason: 删除原因，记进审计日志。
     """
+    if not AGENT_DELETE_ENABLED:
+        _audit(_ctx(config), "crm_delete_order", "delete", str(order_key), success=False, error="FORBIDDEN")
+        return dump(fail("FORBIDDEN", _DELETE_FORBIDDEN_MESSAGE))
+
     ctx, denied = _guard_write(config, "orders", "删除")
     if denied:
         return dump(denied)
@@ -567,9 +589,11 @@ def crm_delete_order(order_key: str, reason: str = "", config: RunnableConfig = 
     )
 
 
-CRM_WRITE_TOOLS = [
-    crm_update_lead,
-    crm_update_order,
-    crm_delete_lead,
-    crm_delete_order,
-]
+# 注册给 Agent 的写工具：只有「修改」，且每次调用都要过人工审批（见 tools_guard.py）
+CRM_UPDATE_TOOLS = [crm_update_lead, crm_update_order]
+
+# 删除工具：实现保留（留底 / 审计逻辑仍可用），但默认不注册、入口直接拒绝。
+CRM_DELETE_TOOLS = [crm_delete_lead, crm_delete_order]
+
+# 完整清单（含删除），仅供测试与文档引用，不要直接塞给 Agent
+CRM_WRITE_TOOLS = [*CRM_UPDATE_TOOLS, *CRM_DELETE_TOOLS]

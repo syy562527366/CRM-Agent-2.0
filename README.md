@@ -71,7 +71,8 @@ agent/             DeepAgents + DeepSeek 的 Python Agent 服务（独立 venv�
 - 对话流：`POST /agent-api/chat/stream`（SSE），服务端按 token 推送，前端打字机渲染；`thread_id` 维持多轮上下文。
 - 消息布局：用户消息右侧蓝色气泡，Agent 左侧白底气泡，两者各带头像；正文走 `react-markdown` + `remark-gfm`（表格带斑马纹与悬浮高亮、代码块带语言角标与「复制」按钮、引用块带主色左边线）。
 - 工具调用面板：Agent 气泡上方以可折叠面板展示每次工具调用，六态配色（执行中蓝 / 完成绿 / 失败红 / 待审批黄 / 已批准绿 / 已拒绝红），展开可见工具用途、参数与返回值；并发工具按 `tool_call_id` 精确配对。
-- 线索分析卡片：Agent 输出 ```lead-analysis-card 代码块时渲染为结构化卡片（姓名、意向等级、预算、竞品提及、建议动作），数据源为 `crm_read_leads` 工具读到的 `data/leads.json`。
+- 人工审批卡：修改类工具（`crm_update_lead` / `crm_update_order`）调用后暂停，弹出审批卡展示「改哪条、改什么」，批准才落库、拒绝则不执行；删除能力对 Agent 关闭。
+- 线索分析卡片：Agent 输出 ```lead-analysis-card 代码块时渲染为结构化卡片（姓名、意向等级、预算、竞品提及、建议动作），数据来自 `crm_get_lead` 等只读工具。
 - 空状态：机器人图标 + 模型与工具能力徽章 + 4 条 CRM 场景引导问句，点击即发送。
 - 组件拆分：`src/components/chat/` 下 Atoms（头像/图标/徽章）、ToolPanel、MarkdownRenderer、LeadAnalysisCard，全部内联样式 + `globals.css` 类，零 Tailwind 依赖。
 - 输入框：Enter 发送、Shift + Enter 换行；中文输入法组合态（`isComposing` / `keyCode 229` / 组合结束后 150ms 内）按 Enter 不会误发送。

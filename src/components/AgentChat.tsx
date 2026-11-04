@@ -9,11 +9,21 @@ import ToolPanel, { type ToolCallView } from "./chat/ToolPanel";
 import MarkdownRenderer from "./chat/MarkdownRenderer";
 import LeadAnalysisCard, { type LeadAnalysisData } from "./chat/LeadAnalysisCard";
 import DataTableCard, { type DataTableCardData } from "./chat/DataTableCard";
+import ApprovalCard, {
+  type ApprovalDecision,
+  type ApprovalPayload,
+} from "./chat/ApprovalCard";
 
 /* ========== 类型 ========== */
 
 /** 工具调用（流式与历史消息共用；result 为空表示仍在执行） */
 type ToolCall = ToolCallView;
+
+/** 审批卡状态：payload 来自 approval_required 事件，resolved 由本地决策写入 */
+interface ApprovalState {
+  payload: ApprovalPayload;
+  resolved?: "approved" | "rejected" | null;
+}
 
 interface ChatMessage {
   id: string;
@@ -22,6 +32,8 @@ interface ChatMessage {
   tools: ToolCall[];
   /** 工具明细卡片（来自 tool_data 事件，不进模型上下文） */
   cards: DataTableCardData[];
+  /** 待人工审批的修改操作 */
+  approval?: ApprovalState;
   streaming?: boolean;
   error?: boolean;
   time: string;
@@ -40,10 +52,24 @@ interface HealthInfo {
   tools: string[];
 }
 
-/* SSE 事件（与 agent/app.py 的 /chat/stream 对齐） */
+/* SSE 事件（与 agent/app.py 的 /chat/stream、/chat/resume 对齐） */
 interface StreamEvent {
   node?: string;
-  type: "token" | "ai" | "tool" | "human" | "system" | "error" | "session" | "warn" | "tool_data";
+  type:
+    | "token"
+    | "ai"
+    | "tool"
+    | "human"
+    | "system"
+    | "error"
+    | "session"
+    | "warn"
+    | "tool_data"
+    /** 修改类工具被拦下，等人批 */
+    | "approval_required"
+    | "approval_resolved"
+    /** 本轮暂停（不是结束，是等人批） */
+    | "paused";
   content?: string;
   tool_calls?: { name: string; args: Record<string, unknown>; id?: string }[];
   tool_call_id?: string | null;
@@ -56,6 +82,13 @@ interface StreamEvent {
   rows?: Record<string, unknown>[];
   total?: number;
   tool_data?: DataTableCardData;
+  /* approval_required */
+  thread_id?: string;
+  interrupt_id?: string;
+  actions?: ApprovalPayload["actions"];
+  mode?: string;
+  /* approval_resolved */
+  decisions?: ApprovalDecision[];
 }
 
 /* ========== 常量 ========== */
@@ -145,6 +178,13 @@ export default function AgentChat() {
   const [healthError, setHealthError] = useState(false);
   const [threadId, setThreadId] = useState(() => newThreadId());
   const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  // 审批：payload + 它挂在哪个气泡上（resume 时要接着这条消息继续渲染）
+  const [pendingApproval, setPendingApproval] = useState<{
+    payload: ApprovalPayload;
+    messageId: string;
+  } | null>(null);
+  const [approvalSubmitting, setApprovalSubmitting] = useState(false);
 
   // 会话管理
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
@@ -247,6 +287,152 @@ export default function AgentChat() {
     setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, ...patch } : m)));
   }, []);
 
+  /* ---------- 流式消费：/chat/stream 与 /chat/resume 共用 ---------- */
+  /**
+   * 边读 SSE 边把结果打到指定气泡上。
+   *
+   * `seed` 是这条气泡已有的内容（审批后恢复时带着之前的正文与工具轨迹继续），
+   * 返回本轮最终正文与「是否停在审批上」。
+   */
+  const consumeStream = useCallback(
+    async (
+      res: Response,
+      agentMsgId: string,
+      seed: { content: string; tools: ToolCall[]; cards: DataTableCardData[] },
+      last: { current: string },
+    ): Promise<{ content: string; paused: boolean }> => {
+      let content = seed.content;
+      let tools = seed.tools;
+      let cards = seed.cards;
+      let paused = false;
+
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const blocks = buffer.split("\n\n");
+        buffer = blocks.pop() ?? "";
+
+        for (const block of blocks) {
+          const line = block.split("\n").find((l) => l.startsWith("data:"));
+          if (!line) continue;
+          const payload = line.slice(5).trim();
+          if (!payload || payload === "[DONE]") continue;
+
+          let event: StreamEvent;
+          try {
+            event = JSON.parse(payload) as StreamEvent;
+          } catch {
+            continue;
+          }
+
+          if (event.type === "token") {
+            // 逐 token 增量，打字机效果
+            content += event.content ?? "";
+            last.current = content;
+            patchMessage(agentMsgId, { content, tools: [...tools] });
+          } else if (event.type === "ai") {
+            if (event.tool_calls?.length) {
+              tools = [
+                ...tools,
+                ...event.tool_calls.map((c) => ({ name: c.name, args: c.args ?? {}, id: c.id })),
+              ];
+              // 发起工具调用后属于新一轮回答，正文重新累积
+              if (!event.content) content = "";
+            }
+            if (event.content) content = event.content;
+            last.current = content;
+            patchMessage(agentMsgId, { content, tools: [...tools] });
+          } else if (event.type === "tool") {
+            // 工具结果按 tool_call_id 回填（并发工具返回顺序不定）
+            let realIdx = event.tool_call_id
+              ? tools.findIndex((t) => t.id === event.tool_call_id)
+              : -1;
+            if (realIdx === -1) {
+              const pending = [...tools].reverse().findIndex((t) => t.result === undefined);
+              if (pending !== -1) realIdx = tools.length - 1 - pending;
+            }
+            if (realIdx !== -1) {
+              tools = tools.map((t, i) =>
+                i === realIdx
+                  ? {
+                      ...t,
+                      result: event.content ?? "",
+                      // 结果回来了，「待审批」这个中间态要撤掉；已拒绝的保留拒绝态
+                      status: t.status === "pending_approval" ? undefined : t.status,
+                    }
+                  : t,
+              );
+              patchMessage(agentMsgId, { tools: [...tools] });
+            }
+          } else if (event.type === "tool_data") {
+            // 工具明细：渲染成表格卡片。刻意不写进 content，
+            // 这样后续轮次模型只看得到摘要，明细不会反复占用上下文。
+            const payload: DataTableCardData | null =
+              event.tool_data ??
+              (event.columns?.length
+                ? {
+                    kind: event.kind,
+                    title: event.title,
+                    tool: event.tool,
+                    columns: event.columns.map((c) => (typeof c === "string" ? { key: c } : c)),
+                    rows: event.rows ?? [],
+                    total: event.total,
+                  }
+                : null);
+            if (payload && payload.columns.length) {
+              cards = [...cards, payload];
+              patchMessage(agentMsgId, { cards: [...cards] });
+            }
+          } else if (event.type === "session" && event.session) {
+            // 服务端回传会话索引（标题 / 轮数 / 活跃时间），列表按时间倒序校准
+            const incoming = event.session;
+            setSessions((prev) => {
+              const rest = prev.filter((s) => s.id !== incoming.id);
+              return [incoming, ...rest].sort((a, b) =>
+                a.updated_at < b.updated_at ? 1 : -1,
+              );
+            });
+          } else if (event.type === "approval_required") {
+            // 修改类工具被拦下：挂上审批卡，并把对应工具行标成「待审批」
+            const approval: ApprovalPayload = {
+              thread_id: event.thread_id ?? threadId,
+              interrupt_id: event.interrupt_id ?? "",
+              actions: event.actions ?? [],
+              mode: event.mode,
+            };
+            const names = new Set(approval.actions.map((a) => a.tool));
+            tools = tools.map((t) =>
+              names.has(t.name) && (!t.status || t.status === "running")
+                ? { ...t, status: "pending_approval" as const }
+                : t,
+            );
+            last.current = content;
+            patchMessage(agentMsgId, {
+              content,
+              tools: [...tools],
+              approval: { payload: approval },
+            });
+            setPendingApproval({ payload: approval, messageId: agentMsgId });
+          } else if (event.type === "paused") {
+            // 不是结束，是等人批：气泡保持非 streaming，输入框由 pendingApproval 锁住
+            paused = true;
+          } else if (event.type === "error") {
+            throw new Error(event.content || "Agent 执行出错");
+          }
+        }
+      }
+
+      return { content, paused };
+    },
+    [patchMessage, threadId],
+  );
+
   /* ---------- 发送 ---------- */
   const handleSend = useCallback(
     async (raw?: string) => {
@@ -303,9 +489,7 @@ export default function AgentChat() {
       abortRef.current = controller;
 
       // 流式过程中累积状态（避免依赖 message 快照）
-      let content = "";
-      let tools: ToolCall[] = [];
-      let cards: DataTableCardData[] = [];
+      const last = { current: "" };
 
       try {
         const res = await fetch(`${AGENT_BASE}/chat/stream`, {
@@ -319,96 +503,14 @@ export default function AgentChat() {
           throw new Error(`服务返回 ${res.status}`);
         }
 
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
+        const { content, paused } = await consumeStream(
+          res,
+          agentMsg.id,
+          { content: "", tools: [], cards: [] },
+          last,
+        );
 
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
-          const blocks = buffer.split("\n\n");
-          buffer = blocks.pop() ?? "";
-
-          for (const block of blocks) {
-            const line = block.split("\n").find((l) => l.startsWith("data:"));
-            if (!line) continue;
-            const payload = line.slice(5).trim();
-            if (!payload || payload === "[DONE]") continue;
-
-            let event: StreamEvent;
-            try {
-              event = JSON.parse(payload) as StreamEvent;
-            } catch {
-              continue;
-            }
-
-            if (event.type === "token") {
-              // 逐 token 增量，打字机效果
-              content += event.content ?? "";
-              patchMessage(agentMsg.id, { content, tools: [...tools] });
-            } else if (event.type === "ai") {
-              if (event.tool_calls?.length) {
-                tools = [
-                  ...tools,
-                  ...event.tool_calls.map((c) => ({ name: c.name, args: c.args ?? {}, id: c.id })),
-                ];
-                // 发起工具调用后属于新一轮回答，正文重新累积
-                if (!event.content) content = "";
-              }
-              if (event.content) content = event.content;
-              patchMessage(agentMsg.id, { content, tools: [...tools] });
-            } else if (event.type === "tool") {
-              // 工具结果按 tool_call_id 回填（并发工具返回顺序不定）
-              let realIdx = event.tool_call_id
-                ? tools.findIndex((t) => t.id === event.tool_call_id)
-                : -1;
-              if (realIdx === -1) {
-                const pending = [...tools].reverse().findIndex((t) => t.result === undefined);
-                if (pending !== -1) realIdx = tools.length - 1 - pending;
-              }
-              if (realIdx !== -1) {
-                tools = tools.map((t, i) =>
-                  i === realIdx ? { ...t, result: event.content ?? "" } : t,
-                );
-                patchMessage(agentMsg.id, { tools: [...tools] });
-              }
-            } else if (event.type === "tool_data") {
-              // 工具明细：渲染成表格卡片。刻意不写进 content，
-              // 这样后续轮次模型只看得到摘要，明细不会反复占用上下文。
-              const payload: DataTableCardData | null =
-                event.tool_data ??
-                (event.columns?.length
-                  ? {
-                      kind: event.kind,
-                      title: event.title,
-                      tool: event.tool,
-                      columns: event.columns.map((c) => (typeof c === "string" ? { key: c } : c)),
-                      rows: event.rows ?? [],
-                      total: event.total,
-                    }
-                  : null);
-              if (payload && payload.columns.length) {
-                cards = [...cards, payload];
-                patchMessage(agentMsg.id, { cards: [...cards] });
-              }
-            } else if (event.type === "session" && event.session) {
-              // 服务端回传会话索引（标题 / 轮数 / 活跃时间），列表按时间倒序校准
-              const incoming = event.session;
-              setSessions((prev) => {
-                const rest = prev.filter((s) => s.id !== incoming.id);
-                return [incoming, ...rest].sort((a, b) =>
-                  a.updated_at < b.updated_at ? 1 : -1,
-                );
-              });
-            } else if (event.type === "error") {
-              throw new Error(event.content || "Agent 执行出错");
-            }
-          }
-        }
-
-        if (!content) {
+        if (!content && !paused) {
           patchMessage(agentMsg.id, {
             content: "（Agent 没有返回文本内容，请换个说法再试一次）",
             error: true,
@@ -418,8 +520,8 @@ export default function AgentChat() {
         const aborted = err instanceof DOMException && err.name === "AbortError";
         if (aborted) {
           patchMessage(agentMsg.id, {
-            content: content || "（已停止生成）",
-            error: !content,
+            content: last.current || "（已停止生成）",
+            error: !last.current,
           });
         } else {
           const detail = err instanceof Error ? err.message : String(err);
@@ -439,7 +541,110 @@ export default function AgentChat() {
         void refreshSessions();
       }
     },
-    [input, streaming, threadId, userId, patchMessage, refreshSessions],
+    [input, streaming, threadId, userId, patchMessage, refreshSessions, consumeStream],
+  );
+
+  /* ---------- 审批：批准 / 拒绝后继续同一轮 ---------- */
+  const handleResume = useCallback(
+    async (messageId: string, decisions: ApprovalDecision[]) => {
+      if (!pendingApproval || pendingApproval.messageId !== messageId || approvalSubmitting) return;
+
+      const { payload } = pendingApproval;
+      const target = messages.find((m) => m.id === messageId);
+      const overall: "approved" | "rejected" = decisions.every((d) => d.type === "approve")
+        ? "approved"
+        : "rejected";
+
+      // 被拒绝的那几项，工具行直接标成「已拒绝」；批准的保持执行中
+      const rejectedNames = new Set(
+        payload.actions.filter((_a, i) => decisions[i]?.type === "reject").map((a) => a.tool),
+      );
+      const seededTools = (target?.tools ?? []).map((t) =>
+        rejectedNames.has(t.name) && t.status === "pending_approval"
+          ? { ...t, status: "rejected" as const }
+          : t,
+      );
+      const seed = {
+        content: target?.content ?? "",
+        tools: seededTools,
+        cards: target?.cards ?? [],
+      };
+
+      // 先落定卡片状态，避免重复点击
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === messageId
+            ? {
+                ...m,
+                approval: { payload, resolved: overall },
+                tools: seededTools,
+                streaming: true,
+              }
+            : m,
+        ),
+      );
+      setPendingApproval(null);
+      setApprovalSubmitting(true);
+
+      const controller = new AbortController();
+      abortRef.current = controller;
+      const last = { current: seed.content };
+      // 决策是否已被服务端接收：接收后出错不应把卡片退回可点状态（否则会重复提交）
+      let accepted = false;
+
+      try {
+        const res = await fetch(`${AGENT_BASE}/chat/resume`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ thread_id: threadId, decisions, user_id: userId }),
+          signal: controller.signal,
+        });
+
+        if (!res.ok || !res.body) {
+          throw new Error(`服务返回 ${res.status}`);
+        }
+        accepted = true;
+
+        await consumeStream(res, messageId, seed, last);
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        const status = Number(detail.match(/服务返回 (\d{3})/)?.[1] ?? 0);
+        patchMessage(messageId, {
+          content:
+            last.current ||
+            (status
+              ? explainStatus(status)
+              : `审批提交失败：${detail}\n\n请确认 Agent 服务已启动（127.0.0.1:3200）。`),
+          error: !last.current,
+        });
+        if (!accepted) {
+          // 服务端没收到决策 → 退回可点状态，让用户重试
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === messageId
+                ? { ...m, approval: { payload, resolved: null }, tools: target?.tools ?? [] }
+                : m,
+            ),
+          );
+          setPendingApproval({ payload, messageId });
+        }
+      } finally {
+        patchMessage(messageId, { streaming: false });
+        setApprovalSubmitting(false);
+        abortRef.current = null;
+        void refreshSessions();
+      }
+    },
+    [
+      pendingApproval,
+      approvalSubmitting,
+      messages,
+      threadId,
+      userId,
+      patchMessage,
+      consumeStream,
+      refreshSessions,
+    ],
   );
 
   /* ---------- 停止生成 ---------- */
@@ -453,6 +658,8 @@ export default function AgentChat() {
     setMessages([]);
     setStreaming(false);
     setInput("");
+    setPendingApproval(null);
+    setApprovalSubmitting(false);
     setThreadId(newThreadId());
     pinnedRef.current = true;
     textareaRef.current?.focus();
@@ -463,6 +670,7 @@ export default function AgentChat() {
     abortRef.current?.abort();
     setStreaming(false);
     setInput("");
+    setPendingApproval(null);
     setThreadId(id);
     setMessages([]);
     pinnedRef.current = true;
@@ -473,9 +681,31 @@ export default function AgentChat() {
     try {
       const res = await fetch(`${AGENT_BASE}/threads/${id}`, { cache: "no-store" });
       if (!res.ok) throw new Error(`服务返回 ${res.status}`);
-      const data = (await res.json()) as { messages?: HistoryMessage[] };
+      const data = (await res.json()) as {
+        messages?: HistoryMessage[];
+        pending_approval?: ApprovalPayload | null;
+      };
       if (ticket !== historySeqRef.current) return;
-      setMessages(toChatMessages(data.messages ?? []));
+
+      const restored = toChatMessages(data.messages ?? []);
+      const pending = data.pending_approval ?? null;
+      if (pending && pending.actions?.length) {
+        // 会话停在审批上：把卡片挂回最后一条 Agent 气泡，输入框继续保持锁定
+        for (let i = restored.length - 1; i >= 0; i -= 1) {
+          if (restored[i].role === "agent") {
+            restored[i] = {
+              ...restored[i],
+              approval: { payload: pending },
+              tools: restored[i].tools.map((t) =>
+                t.result === undefined ? { ...t, status: "pending_approval" as const } : t,
+              ),
+            };
+            setPendingApproval({ payload: pending, messageId: restored[i].id });
+            break;
+          }
+        }
+      }
+      setMessages(restored);
     } catch (err) {
       if (ticket !== historySeqRef.current) return;
       const detail = err instanceof Error ? err.message : String(err);
@@ -547,6 +777,8 @@ export default function AgentChat() {
   const isEmpty = messages.length === 0;
   const activeSession = sessions.find((s) => s.id === threadId) ?? null;
   const showEmpty = isEmpty && !historyLoading;
+  // 有审批卡时锁住输入框：pending 状态下发新消息会被 LangGraph 拒绝
+  const inputLocked = streaming || approvalSubmitting || Boolean(pendingApproval);
 
   /* ========== 渲染 ========== */
   return (
@@ -772,7 +1004,9 @@ export default function AgentChat() {
                   msg={msg}
                   userInitial={(user?.name ?? "我").slice(0, 1)}
                   copied={copiedId === msg.id}
+                  approvalSubmitting={approvalSubmitting}
                   onCopy={() => void handleCopy(msg)}
+                  onApprovalResolve={(decisions) => void handleResume(msg.id, decisions)}
                 />
               ))}
             </div>
@@ -808,7 +1042,14 @@ export default function AgentChat() {
                   compositionEndAtRef.current = Date.now();
                 }}
                 rows={1}
-                placeholder="输入问题，Enter 发送，Shift + Enter 换行…"
+                disabled={inputLocked}
+                placeholder={
+                  pendingApproval
+                    ? "请先处理上面的待审批操作（批准或拒绝）…"
+                    : streaming
+                      ? "正在生成回答…"
+                      : "输入问题，Enter 发送，Shift + Enter 换行…"
+                }
                 style={{
                   flex: 1,
                   minWidth: 0,
@@ -850,8 +1091,8 @@ export default function AgentChat() {
               ) : (
                 <button
                   onClick={() => void handleSend()}
-                  disabled={!input.trim()}
-                  title="发送（Enter）"
+                  disabled={!input.trim() || inputLocked}
+                  title={pendingApproval ? "请先处理待审批操作" : "发送（Enter）"}
                   style={{
                     width: 36,
                     height: 36,
@@ -861,9 +1102,9 @@ export default function AgentChat() {
                     justifyContent: "center",
                     borderRadius: 10,
                     border: "none",
-                    background: input.trim() ? "#2563EB" : "#E2E8F0",
-                    color: input.trim() ? "#fff" : "#94A3B8",
-                    cursor: input.trim() ? "pointer" : "not-allowed",
+                    background: input.trim() && !inputLocked ? "#2563EB" : "#E2E8F0",
+                    color: input.trim() && !inputLocked ? "#fff" : "#94A3B8",
+                    cursor: input.trim() && !inputLocked ? "pointer" : "not-allowed",
                     transition: "background .15s ease",
                   }}
                 >
@@ -971,18 +1212,24 @@ function MessageRow({
   msg,
   userInitial,
   copied,
+  approvalSubmitting,
   onCopy,
+  onApprovalResolve,
 }: {
   msg: ChatMessage;
   userInitial: string;
   copied: boolean;
+  approvalSubmitting?: boolean;
   onCopy: () => void;
+  onApprovalResolve: (decisions: ApprovalDecision[]) => void;
 }) {
   const isUser = msg.role === "user";
   const hasTools = !isUser && msg.tools.length > 0;
   const hasCards = !isUser && msg.cards.length > 0;
-  // 有工具在跑（或已带回明细卡片）且还没正文时，只显示面板/卡片，不显示空气泡
-  const showBubble = isUser || !!msg.content || (msg.streaming && !hasTools && !hasCards);
+  const hasApproval = !isUser && Boolean(msg.approval);
+  // 有工具在跑（或已带回明细卡片 / 审批卡）且还没正文时，只显示面板，不显示空气泡
+  const showBubble =
+    isUser || !!msg.content || (msg.streaming && !hasTools && !hasCards && !hasApproval);
 
   return (
     <div
@@ -1006,6 +1253,16 @@ function MessageRow({
       >
         {/* 工具调用轨迹（在气泡上方，按执行顺序展示） */}
         {hasTools && <ToolPanel tools={msg.tools} />}
+
+        {/* 修改类操作的人工审批卡 */}
+        {hasApproval && msg.approval && (
+          <ApprovalCard
+            data={msg.approval.payload}
+            resolved={msg.approval.resolved}
+            submitting={approvalSubmitting}
+            onResolve={onApprovalResolve}
+          />
+        )}
 
         {/* 工具明细表格（来自 tool_data 事件） */}
         {hasCards &&

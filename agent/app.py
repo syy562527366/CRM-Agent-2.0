@@ -11,9 +11,10 @@
     POST   /sessions           新建会话
     PATCH  /sessions/{id}      重命名会话
     DELETE /sessions/{id}      删除会话（连同对话记录）
-    GET    /threads/{id}       某会话的完整消息历史（前端渲染用）
+    GET    /threads/{id}       某会话的完整消息历史（前端渲染用，含待审批状态）
     POST   /chat               同步对话（多轮靠 thread_id 维持上下文）
     POST   /chat/stream        SSE 流式对话，逐 token 推送
+    POST   /chat/resume        人工审批后恢复被中断的执行（批准 / 拒绝）
 """
 
 from __future__ import annotations
@@ -37,15 +38,20 @@ from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_deepseek import ChatDeepSeek
 from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.types import Command
 from pydantic import BaseModel, Field
 
+import tools_guard as guard
 from crm_client import CrmCtx
 from tools import TOOLS as BASE_TOOLS
 from tools_crm import CRM_TOOLS
-from tools_crm_write import CRM_WRITE_TOOLS
+from tools_crm_write import CRM_UPDATE_TOOLS
 
-# 通用工具 + CRM 只读工具 + CRM 写操作工具（修改 / 删除）
-TOOLS = [*BASE_TOOLS, *CRM_TOOLS, *CRM_WRITE_TOOLS]
+# 注册给模型的工具：通用工具 + CRM 只读工具 + CRM 修改工具。
+# 删除工具（crm_delete_lead / crm_delete_order）**刻意不注册**：
+# 产品要求 Agent 不得删除数据，模型看不到工具就不会去调用；
+# 即使被误注册，工具入口还有 AGENT_DELETE_ENABLED 兜底。
+TOOLS = [*BASE_TOOLS, *CRM_TOOLS, *CRM_UPDATE_TOOLS]
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
@@ -65,6 +71,7 @@ SYSTEM_PROMPT = """你是一个严谨、简洁的中文智能助手，运行在�
 2. 所有数字必须来自工具返回。工具没给的数字不要算、不要猜；需要求和或求占比时调用 calculator。
 3. 工具返回 ok=false 时如实转述 message：
    - PERMISSION_DENIED：直接说「当前账号没有 XX 权限」，不得改用其他工具拼凑或推测；
+   - FORBIDDEN：说明 Agent 不提供这个能力（例如删除），不要改口说「系统不支持」；
    - INVALID_ARGUMENT：按返回的 options 修正参数重试一次，仍失败就问用户；
    - TIMEOUT / SERVICE_UNAVAILABLE：告诉用户 CRM 服务暂时不可用。
 4. 工具返回的 items 是摘要且受 limit 限制，条数要看 total，不要说「一共只有 N 条」。
@@ -72,25 +79,31 @@ SYSTEM_PROMPT = """你是一个严谨、简洁的中文智能助手，运行在�
 5. 用户说「我的」「我负责的」时不要传 assignee，服务端会按数据范围自动过滤。
 6. 手机号等敏感字段只用工具返回的脱敏值，不要尝试还原。
 
-## 写操作纪律（修改 / 删除，务必严格遵守）
-可用的写工具：crm_update_lead、crm_update_order、crm_delete_lead、crm_delete_order。
+## 写操作纪律（只能修改，不能删除）
+可用的写工具只有两个：`crm_update_lead`、`crm_update_order`。
 
-0. `crm_update_lead` 能改的字段就这些：姓名、电话、客户来源、状态、优先级、负责人、
+0. **你没有删除能力**。用户说要删线索 / 删订单时，直接回答「我不能删除数据，请在对应列表页
+   手动删除」，不要尝试用修改状态来冒充删除，也不要说「系统不支持删除」这种把责任推给系统的话。
+   被问到「能不能删」也一样：说明是 Agent 不提供删除能力，需要人工在页面操作。
+1. **每次修改都要人工确认**：调用修改工具后，界面会弹出审批卡，用户点「批准」才真正落库。
+   调用前用一句话说清要改什么（哪条记录、哪个字段、改成什么），不要长篇解释。
+   用户拒绝、或说「先别动」之后，不要重复发起同一处修改，也不要换个工具绕过去。
+   审批被拒绝时，如实说「已取消，数据没有改动」。
+2. `crm_update_lead` 能改的字段就这些：姓名、电话、客户来源、状态、优先级、负责人、
    意向产品、预算区间、客户定位、试用时长、备注。用户要改的如果在这张表里，就直接改，
    **不要回答「改不了」**；只有确实不在表里（例如线索编号、创建时间、沟通次数）才说明不可改。
    电话是订单的关联键，改号后要提醒用户历史订单仍挂在旧号码上。
-1. **目标必须明确**：只有当用户在本轮明确提出要改/删，且能定位到具体一条记录时才动手。
+3. **目标必须明确**：只有当用户在本轮明确提出要改，且能定位到具体一条记录时才动手。
    能用编号就用编号；用户只给姓名时，工具会返回 AMBIGUOUS 和候选列表，
    这时必须把候选（编号 + 姓名 + 负责人 + 当前状态）列给用户选，**不要自己挑一条，也不要原样重试**。
-2. **含糊指令先查后问**：用户说「把没用的线索清理一下」「帮我整理客户」这类话时，
-   先查询并列出候选，等用户确认具体编号后再删，不要自行判断哪条「没用」。
-3. **一次一条**：不支持批量修改或批量删除。用户要批量时，说明需要逐条确认，并把清单给出来。
-4. **只传要改的字段**：修改类工具没传的参数会保持原值，不要为了「填满」而重复传原值。
-5. **说清代价再动手**：涉及删除或转移负责人的，先用一句话说明影响（删了就没有了 / 转走你可能看不到），再调用工具。
-6. **结果按实际说**：工具返回的 changed 是真正变化的字段，用「旧值 → 新值」简短汇报（值用中文说，
+4. **含糊指令先查后问**：用户说「帮我整理客户」「把没用的线索清一清」这类话时，
+   先查询并列出候选，等用户确认具体编号后再改，不要自行判断哪条该动。
+5. **一次一条**：不支持批量修改。用户要批量时，说明需要逐条确认，并把清单给出来。
+6. **只传要改的字段**：修改类工具没传的参数会保持原值，不要为了「填满」而重复传原值。
+7. **结果按实际说**：工具返回的 changed 是真正变化的字段，用「旧值 → 新值」简短汇报（值用中文说，
    例如 low 说「低」、high 说「高」，不要直接念英文枚举）；
-   工具报 PERMISSION_DENIED 就直说没有修改或删除权限，不要换工具重试，也不要声称已经改好。
-7. 写操作成功后不要重复罗列变更表格（卡片已经展示），一两句话总结即可。
+   工具报 PERMISSION_DENIED 就直说没有修改权限，不要换工具重试，也不要声称已经改好。
+8. 写操作成功后不要重复罗列变更表格（卡片已经展示），一两句话总结即可。
 
 ## 回答风格
 - 用自然中文先给结论再列要点，不要粘贴原始 JSON。
@@ -296,6 +309,9 @@ def create_agent_with(model: ChatDeepSeek, workspace: str = "_shared"):
         system_prompt=SYSTEM_PROMPT,
         checkpointer=checkpointer,
         backend=backend,
+        # 修改类工具每次调用都会暂停等人批（approve / reject），
+        # 中断点落在 checkpointer 里，进程重启也能接着批。
+        interrupt_on=guard.build_interrupt_on(),
     )
 
 
@@ -534,11 +550,12 @@ def chat(
     x_crm_user: str = Header(default=""),
 ) -> dict[str, Any]:
     ctx = _parse_identity(x_crm_context, x_crm_token, x_crm_user or req.user_id)
+    config = _config(req.thread_id, ctx)
     try:
         agent = get_agent(_workspace_name(ctx.uid or req.user_id))
         result = agent.invoke(
             {"messages": [HumanMessage(content=req.message)]},
-            config=_config(req.thread_id, ctx),
+            config=config,
         )
     except Exception as exc:  # noqa: BLE001 - 统一转成 502，便于前端展示
         raise HTTPException(status_code=502, detail=f"Agent 执行失败: {exc}") from exc
@@ -549,7 +566,138 @@ def chat(
     payload = _summarize(messages)
     payload["thread_id"] = req.thread_id
     payload["session"] = session
+    # 非流式入口遇到修改类工具时也会中断：把待审批内容一并回传，
+    # 调用方需要改用 /chat/resume 继续（前端走的是 SSE，不受影响）。
+    pending = _pending_approval(agent, config, req.thread_id)
+    if pending:
+        payload["pending_approval"] = pending
+        if not payload.get("reply"):
+            payload["reply"] = "这条修改需要人工确认，请调用 /chat/resume 提交决策。"
     return payload
+
+
+# --------------------------------------------------------------------------- #
+# 审批：中断检测 / 恢复
+# --------------------------------------------------------------------------- #
+def _sse(event: dict[str, Any]) -> str:
+    return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+
+def _interrupts_of(state: Any) -> list[Any]:
+    """取出该 thread 上所有待处理的中断（LangGraph 把它们挂在 task 上）。"""
+    items: list[Any] = []
+    for task in getattr(state, "tasks", None) or ():
+        items.extend(getattr(task, "interrupts", None) or ())
+    return items
+
+
+def _pending_approval(agent: Any, config: dict[str, Any], thread_id: str) -> dict[str, Any] | None:
+    """该会话是否停在「等人批」。是则返回与 SSE 同构的 approval_required 事件。"""
+    try:
+        state = agent.get_state(config)
+    except Exception:  # noqa: BLE001 - 读不到状态就当没有 pending
+        return None
+    for item in _interrupts_of(state):
+        return guard.build_approval_event(
+            getattr(item, "value", None), thread_id, getattr(item, "id", "")
+        )
+    return None
+
+
+def _stream_events(
+    agent: Any,
+    graph_input: Any,
+    config: dict[str, Any],
+    thread_id: str,
+    user_id: str,
+    sink: list[dict[str, Any]],
+) -> Iterator[str]:
+    """把一轮执行翻成 SSE。
+
+    `/chat/stream`（新消息）与 `/chat/resume`（审批后继续）共用这一段，
+    保证两条入口的事件协议完全一致，前端只需实现一套渲染。
+    """
+    paused = False
+    try:
+        # 同时订阅两种流：
+        #   messages → 逐 token 增量，前端可像打字机一样渲染
+        #   updates  → 节点级快照，用于拿工具调用、中断与最终文本
+        for mode, chunk in agent.stream(graph_input, config=config, stream_mode=["messages", "updates"]):
+            if mode == "messages":
+                token, metadata = chunk
+                # 只把 AI 的正文当 token 推：工具返回（ToolMessage）走下面的 tool 事件，
+                # 否则原始 JSON / 英文拒绝语会先闪一下再被正文覆盖。
+                if isinstance(token, AIMessage):
+                    text = _text_of(token)
+                    if text:
+                        yield _sse(
+                            {
+                                "node": (metadata or {}).get("langgraph_node"),
+                                "type": "token",
+                                "content": text,
+                                "tool_calls": [],
+                            }
+                        )
+                continue
+
+            for node, delta in (chunk or {}).items():
+                # 中断事件的值是 tuple(Interrupt)，不是 dict。
+                # 必须先于 isinstance(delta, dict) 判断处理，否则会被静默丢掉，
+                # 表现为「Agent 卡住、没有回复也没有报错」。
+                if node == "__interrupt__":
+                    items = delta if isinstance(delta, (list, tuple)) else (delta,)
+                    for item in items:
+                        yield _sse(
+                            guard.build_approval_event(
+                                getattr(item, "value", None), thread_id, getattr(item, "id", "")
+                            )
+                        )
+                        paused = True
+                    continue
+                if not isinstance(delta, dict):
+                    continue
+                for message in delta.get("messages", []) or []:
+                    if not isinstance(message, BaseMessage):
+                        continue
+                    event: dict[str, Any] = {
+                        "node": node,
+                        "type": message.type,
+                        "content": _text_of(message),
+                        "tool_calls": _tool_calls_of(message),
+                    }
+                    # 工具结果是并发返回的，带上 id 供前端精确回填
+                    if isinstance(message, ToolMessage):
+                        event["tool_call_id"] = getattr(message, "tool_call_id", None)
+                    yield _sse(event)
+
+                # 工具执行完后把明细推给前端渲染表格，不进模型上下文
+                for card in _drain(sink):
+                    yield _sse({"type": "tool_data", **card})
+    except Exception as exc:  # noqa: BLE001 - SSE 内无法改状态码，用事件告知
+        yield _sse({"type": "error", "content": f"{exc}"})
+        return
+
+    # 本轮结束或暂停都要刷新会话索引（标题 / 轮数 / 活跃时间）
+    try:
+        state = agent.get_state(config)
+        messages = (state.values or {}).get("messages", []) if state else []
+        session = _sync_session(thread_id, messages, user_id)
+        yield _sse({"type": "session", "session": session})
+    except Exception as exc:  # noqa: BLE001 - 索引失败不影响本次回答
+        yield _sse({"type": "warn", "content": f"会话索引更新失败: {exc}"})
+
+    if paused:
+        # 不是结束，是等人：前端据此保留审批卡并禁用输入框
+        yield _sse({"type": "paused", "thread_id": thread_id})
+    yield "data: [DONE]\n\n"
+
+
+def _streaming_response(source: Iterator[str]) -> StreamingResponse:
+    return StreamingResponse(
+        source,
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.post("/chat/stream")
@@ -561,93 +709,139 @@ def chat_stream(
 ) -> StreamingResponse:
     ctx = _parse_identity(x_crm_context, x_crm_token, x_crm_user or req.user_id)
     workspace = _workspace_name(ctx.uid or req.user_id)
+    user_id = ctx.uid or req.user_id
     sink: list[dict[str, Any]] = []
-
-    def sse(event: dict[str, Any]) -> str:
-        return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
     def event_source() -> Iterator[str]:
         try:
             agent = get_agent(workspace)
-            # 同时订阅两种流：
-            #   messages → 逐 token 增量，前端可像打字机一样渲染
-            #   updates  → 节点级快照，用于拿工具调用与最终文本
-            for mode, chunk in agent.stream(
-                {"messages": [HumanMessage(content=req.message)]},
-                config=_config(req.thread_id, ctx, sink),
-                stream_mode=["messages", "updates"],
-            ):
-                if mode == "messages":
-                    token, metadata = chunk
-                    text = _text_of(token)
-                    if text:
-                        yield sse(
-                            {
-                                "node": (metadata or {}).get("langgraph_node"),
-                                "type": "token",
-                                "content": text,
-                                "tool_calls": [],
-                            }
-                        )
-                    continue
+        except Exception as exc:  # noqa: BLE001
+            yield _sse({"type": "error", "content": f"{exc}"})
+            return
 
-                for node, delta in (chunk or {}).items():
-                    if not isinstance(delta, dict):
-                        continue
-                    for message in delta.get("messages", []) or []:
-                        if not isinstance(message, BaseMessage):
-                            continue
-                        event: dict[str, Any] = {
-                            "node": node,
-                            "type": message.type,
-                            "content": _text_of(message),
-                            "tool_calls": _tool_calls_of(message),
-                        }
-                        # 工具结果是并发返回的，带上 id 供前端精确回填
-                        if isinstance(message, ToolMessage):
-                            event["tool_call_id"] = getattr(message, "tool_call_id", None)
-                        yield sse(event)
+        config = _config(req.thread_id, ctx, sink)
+        # 上一轮还停在审批上，新消息不能在同一个 thread 上跑（LangGraph 会拒绝）
+        if _pending_approval(agent, config, req.thread_id):
+            yield _sse({"type": "error", "content": guard.PENDING_MESSAGE})
+            return
 
-                # 工具执行完后把明细推给前端渲染表格，不进模型上下文
-                for card in _drain(sink):
-                    yield sse({"type": "tool_data", **card})
+        yield from _stream_events(
+            agent,
+            {"messages": [HumanMessage(content=req.message)]},
+            config,
+            req.thread_id,
+            user_id,
+            sink,
+        )
 
-            # 本轮结束后刷新会话索引（标题 / 轮数 / 活跃时间）
-            try:
-                state = agent.get_state(_config(req.thread_id, ctx))
-                messages = (state.values or {}).get("messages", []) if state else []
-                session = _sync_session(req.thread_id, messages, ctx.uid or req.user_id)
-                yield sse({"type": "session", "session": session})
-            except Exception as exc:  # noqa: BLE001 - 索引失败不影响本次回答
-                yield sse({"type": "warn", "content": f"会话索引更新失败: {exc}"})
+    return _streaming_response(event_source())
 
-            yield "data: [DONE]\n\n"
-        except Exception as exc:  # noqa: BLE001 - SSE 内无法改状态码，用事件告知
-            error = {"type": "error", "content": f"{exc}"}
-            yield f"data: {json.dumps(error, ensure_ascii=False)}\n\n"
 
-    return StreamingResponse(
-        event_source(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+class ResumeDecision(BaseModel):
+    type: str = Field(..., description="approve（批准）或 reject（拒绝）")
+    message: str = Field("", description="拒绝理由，会转给模型作为说明")
+
+
+class ResumeRequest(BaseModel):
+    thread_id: str = Field(..., description="被中断的会话 ID")
+    decisions: list[ResumeDecision] = Field(..., description="与 actions 顺序一一对应")
+    user_id: str = ""
+
+
+@app.post("/chat/resume")
+def chat_resume(
+    req: ResumeRequest,
+    x_crm_context: str = Header(default=""),
+    x_crm_token: str = Header(default=""),
+    x_crm_user: str = Header(default=""),
+) -> StreamingResponse:
+    """人工审批后恢复执行：批准 → 工具真正执行；拒绝 → 工具不执行，模型收到拒绝说明。"""
+    ctx = _parse_identity(x_crm_context, x_crm_token, x_crm_user or req.user_id)
+    workspace = _workspace_name(ctx.uid or req.user_id)
+    user_id = ctx.uid or req.user_id
+    sink: list[dict[str, Any]] = []
+
+    decisions = [item.model_dump() for item in req.decisions]
+    if not decisions:
+        raise HTTPException(status_code=400, detail="decisions 不能为空")
+    for item in decisions:
+        if item.get("type") not in ("approve", "reject"):
+            raise HTTPException(status_code=400, detail=f"不支持的决策类型：{item.get('type')}")
+
+    def event_source() -> Iterator[str]:
+        try:
+            agent = get_agent(workspace)
+        except Exception as exc:  # noqa: BLE001
+            yield _sse({"type": "error", "content": f"{exc}"})
+            return
+
+        config = _config(req.thread_id, ctx, sink)
+        pending = _pending_approval(agent, config, req.thread_id)
+        if not pending:
+            yield _sse({"type": "error", "content": "这个会话当前没有待审批的操作（可能已经处理过，请刷新会话）"})
+            return
+
+        actions = pending.get("actions") or []
+        if len(decisions) != len(actions):
+            yield _sse(
+                {
+                    "type": "error",
+                    "content": f"待审批 {len(actions)} 项，收到 {len(decisions)} 条决策，请刷新会话后重试",
+                }
+            )
+            return
+
+        # 先留痕再执行：万一执行中断，至少有「谁批了什么」的记录
+        guard.record_decisions(ctx, req.thread_id, actions, decisions)
+        yield _sse(
+            {
+                "type": "approval_resolved",
+                "thread_id": req.thread_id,
+                "decisions": decisions,
+            }
+        )
+
+        yield from _stream_events(
+            agent,
+            Command(resume={"decisions": decisions}),
+            config,
+            req.thread_id,
+            user_id,
+            sink,
+        )
+
+    return _streaming_response(event_source())
 
 
 @app.get("/threads/{thread_id}")
-def thread_history(thread_id: str) -> dict[str, Any]:
+def thread_history(
+    thread_id: str,
+    x_crm_context: str = Header(default=""),
+    x_crm_token: str = Header(default=""),
+    x_crm_user: str = Header(default=""),
+) -> dict[str, Any]:
+    ctx = _parse_identity(x_crm_context, x_crm_token, x_crm_user)
+    session = _get_session(thread_id)
+    # 会话归属校验：thread_id 是可猜的短串，不能让人拿别人的 ID 读历史
+    if session and session.get("user_id") and ctx.uid and session["user_id"] != ctx.uid:
+        raise HTTPException(status_code=403, detail="无权查看该会话")
+
     try:
-        state = get_agent().get_state(_config(thread_id))
+        agent = get_agent(_workspace_name(ctx.uid or x_crm_user))
+        config = _config(thread_id, ctx)
+        state = agent.get_state(config)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     messages = (state.values or {}).get("messages", []) if state else []
-    session = _get_session(thread_id)
     return {
         "thread_id": thread_id,
         "count": len(messages),
         "turns": len([m for m in messages if isinstance(m, HumanMessage)]),
         "session": session,
         "messages": _ui_history(messages),
+        # 切走 / 刷新回来时用它把审批卡重新渲染出来
+        "pending_approval": _pending_approval(agent, config, thread_id),
     }
 
 

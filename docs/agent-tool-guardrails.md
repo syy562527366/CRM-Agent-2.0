@@ -1,5 +1,15 @@
 # Agent 工具限制与人工审批 —— 设计方案
 
+> **落地状态（2026-11-04）**：本文是设计论证，实际实现按产品要求收敛为更严格的三档——
+> 查询直通、修改必审批、**删除彻底关闭**（不是「审批后可删」）。
+> 已实现：`agent/tools_guard.py`（策略与中文摘要）、`app.py` 的 `__interrupt__` 处理、
+> `POST /chat/resume`、`GET /threads` 回传 `pending_approval`、前端 `ApprovalCard`、
+> 删除工具双重拦截（不注册 + `AGENT_DELETE_ENABLED=False`）、审批留痕 `audit.jsonl`。
+> 测试：`agent/test_guard.py`（17 项）、`agent/test_write_tools.py`、端到端 19 项。
+> **未做**：L1 按角色裁剪工具（含 `get_agent` 缓存键改 `(workspace, role_id)`）、
+> 参数编辑（`edit` 决策）、审批超时自动拒绝。
+> 下文第三节~第五节的「删除走审批」是原始设计，实际以本文开头三档为准。
+>
 > 目标：限制 Agent 能用哪些工具、能操作到什么程度，并在高危操作前停下来等人批准。
 > 环境：deepagents 0.7.32 / langchain 1.4.7 / langgraph 1.2.18 / FastAPI + SqliteSaver。
 > 本文所有 API 签名与行为都在本机实测过，不是文档推断。

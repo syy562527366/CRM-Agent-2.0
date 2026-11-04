@@ -1,7 +1,7 @@
 """写操作工具的自测脚本（不经过大模型，直接调用工具函数）。
 
-覆盖：修改线索 / 修改订单 / 删除线索 / 删除订单，以及权限拒绝、
-参数校验、目标不存在、重名歧义、审计留痕、删除留底。
+覆盖：修改线索 / 修改订单，以及权限拒绝、参数校验、目标不存在、重名歧义、审计留痕；
+另外验证「Agent 禁止删除」这条硬约束（删除工具入口一律 FORBIDDEN，且不注册给模型）。
 
 运行前需保证 CRM（3100）已启动。脚本自己创建测试数据并清理；
 对既有数据的改动只动状态和金额，结束时按原值还原。
@@ -27,8 +27,9 @@ sys.path.insert(0, str(ROOT / "agent"))
 
 from crm_client import CrmCtx  # noqa: E402
 from tools_crm_write import (  # noqa: E402
+    AGENT_DELETE_ENABLED,
     AUDIT_PATH,
-    TRASH_PATH,
+    CRM_DELETE_TOOLS,
     crm_delete_lead,
     crm_delete_order,
     crm_update_lead,
@@ -96,6 +97,10 @@ class Api:
 
     def post(self, path: str, json: dict | None = None) -> requests.Response:
         return requests.post(CRM + path, headers=self.headers, json=json, timeout=10)
+
+    def delete(self, path: str) -> requests.Response:
+        """测试数据清理用（Agent 自己没有删除能力，只能由测试脚本直连 CRM 清场）。"""
+        return requests.delete(CRM + path, headers=self.headers, timeout=10)
 
 
 def call(tool, args: dict, ctx: CrmCtx, sink: list | None = None) -> dict:
@@ -228,24 +233,25 @@ def main() -> int:
         untouched = api.get(f"/api/leads/{created[1]['id']}").json()
         check("修改线索 · 歧义时不落盘", not untouched.get("status"), f"status={untouched.get('status')!r}")
 
-        # ------------------------------------------------------------ 删除线索
-        sink = []
-        r = call(crm_delete_lead, {"lead_id": created[0]["id"], "reason": "自测清理"}, admin, sink)
-        check("删除线索 · 成功", r.get("ok") and r.get("action") == "delete", f"{r.get('lead_id')} {r.get('name')}")
-        check("删除线索 · 卡片", bool(sink) and sink[0]["kind"] == "delete_table", f"kind={sink[0]['kind'] if sink else None}")
+        # ------------------------------------------------------------ 禁止删除
+        check("删除 · 开关处于关闭状态", AGENT_DELETE_ENABLED is False, f"AGENT_DELETE_ENABLED={AGENT_DELETE_ENABLED}")
+        check("删除 · 删除工具仍保留实现", len(CRM_DELETE_TOOLS) == 2, "留档但不开放，注册校验见 test_guard.py")
+
+        r = call(crm_delete_lead, {"lead_id": created[0]["id"], "reason": "自测清理"}, admin)
+        check("删除线索 · Agent 被禁止", r.get("error") == "FORBIDDEN", r.get("message", "")[:40])
         check(
-            "删除线索 · 已不可访问",
-            api.get(f"/api/leads/{created[0]['id']}").status_code == 404,
+            "删除线索 · 被拒后数据仍在",
+            api.get(f"/api/leads/{created[0]['id']}").status_code == 200,
             "",
         )
 
-        r = call(crm_delete_lead, {"lead_id": "测试同名", "reason": "自测清理"}, admin)
-        check("删除线索 · 按姓名唯一匹配", r.get("ok"), f"删除 {r.get('lead_id')}")
+        # 清理测试数据：直连 CRM（Agent 无删除能力，只能由测试脚本清场）
+        cleaned = [
+            api.delete(f"/api/leads/{row['id']}").status_code for row in created
+        ]
+        check("清理 · 直连 CRM 删除测试线索", all(code in (200, 204) for code in cleaned), f"HTTP {cleaned}")
 
         # ------------------------------------------------------------ 权限
-        r = call(crm_delete_lead, {"lead_id": "LD-2026-0003"}, sales)
-        check("权限 · 销售无删除权被拒", r.get("error") == "PERMISSION_DENIED", r.get("message", "")[:38])
-
         cur_priority = api.get("/api/leads/LD-2026-0003").json().get("priority") or "medium"
         target_priority = "low" if cur_priority != "low" else "high"
         r = call(crm_update_lead, {"lead_id": "LD-2026-0003", "priority": target_priority}, sales)
@@ -256,7 +262,7 @@ def main() -> int:
         )
         call(crm_update_lead, {"lead_id": "LD-2026-0003", "priority": cur_priority}, sales)
 
-        r = call(crm_delete_lead, {"lead_id": "LD-2026-0003"}, CrmCtx())
+        r = call(crm_update_lead, {"lead_id": "LD-2026-0003", "status": "成交"}, CrmCtx())
         check("权限 · 无身份被拒", r.get("error") == "UNAUTHORIZED", r.get("message", "")[:30])
 
         # ------------------------------------------------------------ 修改订单
@@ -284,39 +290,39 @@ def main() -> int:
             r = call(crm_update_order, {"order_key": "ORD-不存在", "amount": 100}, admin)
             check("修改订单 · 订单号不存在", r.get("error") == "NOT_FOUND", r.get("message", "")[:30])
 
-            # -------------------------------------------------------- 删除订单
+            # -------------------------------------------------------- 删除订单（应被禁止）
             if products:
                 lead_phone = api.get("/api/leads/LD-2026-0002").json()["phone"]
                 made = api.post("/api/orders", json={"customerPhone": lead_phone, "productId": products[0]["id"]})
                 if made.status_code in (200, 201):
                     new_order = made.json()
                     r = call(crm_delete_order, {"order_key": new_order["orderNo"], "reason": "自测清理"}, admin)
-                    check("删除订单 · 成功", r.get("ok"), f"{new_order['orderNo']} ¥{r.get('amount')}")
+                    check("删除订单 · Agent 被禁止", r.get("error") == "FORBIDDEN", r.get("message", "")[:40])
                     check(
-                        "删除订单 · 已不可访问",
-                        api.get(f"/api/orders/{new_order['id']}").status_code == 404,
+                        "删除订单 · 被拒后数据仍在",
+                        api.get(f"/api/orders/{new_order['id']}").status_code == 200,
                         "",
                     )
+                    check(
+                        "清理 · 直连 CRM 删除测试订单",
+                        api.delete(f"/api/orders/{new_order['id']}").status_code in (200, 204),
+                        new_order["orderNo"],
+                    )
                 else:
-                    check("删除订单 · 成功", False, f"测试订单创建失败 HTTP {made.status_code} {made.text[:60]}")
+                    check("删除订单 · Agent 被禁止", False, f"测试订单创建失败 HTTP {made.status_code} {made.text[:60]}")
 
     # -------------------------------------------------------------------- 留痕
     audit = lines(AUDIT_PATH)
     tools_hit = {row["tool"] for row in audit}
     check(
-        "审计 · 四类写操作均有记录",
-        {"crm_update_lead", "crm_update_order", "crm_delete_lead", "crm_delete_order"} <= tools_hit,
+        "审计 · 修改操作有记录",
+        {"crm_update_lead", "crm_update_order"} <= tools_hit,
         f"累计 {len(audit)} 条 / {len(tools_hit)} 种工具",
     )
+    blocked = [row for row in audit if row["tool"].startswith("crm_delete") and row.get("error") == "FORBIDDEN"]
+    check("审计 · 被禁止的删除也留痕", bool(blocked), f"累计 {len(blocked)} 条 FORBIDDEN")
     failed_logged = [row for row in audit if not row["ok"]]
     check("审计 · 失败也留痕", bool(failed_logged), f"失败 {len(failed_logged)} 条")
-
-    trash = lines(TRASH_PATH)
-    check(
-        "留底 · 删除前快照可回捞",
-        bool(trash) and all("row" in row for row in trash[-2:]),
-        f"累计 {len(trash)} 条",
-    )
 
     passed = sum(1 for _, ok, _ in results if ok)
     print(f"\n{passed}/{len(results)} 通过")

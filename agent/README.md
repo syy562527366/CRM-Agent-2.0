@@ -46,9 +46,10 @@ cd agent && ./.venv/Scripts/python.exe app.py
 | POST | `/sessions` | 新建会话：`{"user_id": "..."}`，同时清理该用户无对话的空会话 |
 | PATCH | `/sessions/{id}` | 重命名会话：`{"title": "..."}` |
 | DELETE | `/sessions/{id}` | 删除会话，连同对话记录（checkpoint）一起清掉 |
-| GET | `/threads/{thread_id}` | 某会话历史，已压成前端气泡结构（`user` / `agent` + `tools`） |
+| GET | `/threads/{thread_id}` | 某会话历史，已压成前端气泡结构（`user` / `agent` + `tools`），并带 `pending_approval`（待审批） |
 | POST | `/chat` | 同步对话：`{"message": "...", "thread_id": "demo", "user_id": "..."}` |
-| POST | `/chat/stream` | SSE 流式，逐 token 推送 |
+| POST | `/chat/stream` | SSE 流式，逐 token 推送；修改类工具会推 `approval_required` + `paused` |
+| POST | `/chat/resume` | 人工审批后恢复执行：`{"thread_id", "decisions": [{"type":"approve"|"reject", "message"}]}` |
 
 `/chat/stream` 同时订阅 `messages`（逐 token 增量）与 `updates`（节点快照），事件类型为 `token` / `ai` / `tool` / `tool_data` / `session` / `error`；`tool` 事件带 `tool_call_id`，前端据此精确回填工具结果（并发工具返回顺序不定）。一轮结束后会推一条 `session` 事件，回传该会话的最新标题与轮数。
 
@@ -77,10 +78,10 @@ CRM 前端「AI 助手」页（`/agent`）通过 Next 的 Route Handler `/agent-
 | `crm_list_products` | 在售商品与价格 | `products.查看` |
 | `crm_lead_stats` | 线索分组计数（状态 / 来源 / 负责人 / 优先级） | `leads.查看` |
 | `crm_sales_stats` | 销售统计（商品 / 负责人 / 月份，含成交额与客单价） | `orders.查看` |
-| `crm_update_lead` | 改线索的状态 / 优先级 / 负责人 / 意向产品 / 预算 / 定位 / 试用时长 / 备注 | `leads.修改` |
-| `crm_update_order` | 调订单金额（正数校验，变动 ≥50% 会给出警告） | `orders.修改` |
-| `crm_delete_lead` | 删除线索（留底 `data/trash.jsonl`） | `leads.删除` |
-| `crm_delete_order` | 删除订单（留底 `data/trash.jsonl`） | `orders.删除` |
+| `crm_update_lead` | 改线索的状态 / 优先级 / 负责人 / 意向产品 / 预算 / 定位 / 试用时长 / 备注。**每次调用都要人工审批** | `leads.修改` |
+| `crm_update_order` | 调订单金额（正数校验，变动 ≥50% 会给出警告）。**每次调用都要人工审批** | `orders.修改` |
+| ~~`crm_delete_lead`~~ | **不注册给模型**（Agent 无删除能力）；实现保留，入口直接 `FORBIDDEN` 并留痕 | `leads.删除` |
+| ~~`crm_delete_order`~~ | 同上 | `orders.删除` |
 
 CRM 工具统一走 HTTP 调 CRM 的 `/api/*`，**不再直读 `data/*.json`**：权限、数据范围、脱敏只在 CRM 侧实现一次，换存储不用动工具代码。返回统一信封：
 
@@ -93,9 +94,13 @@ CRM 工具统一走 HTTP 调 CRM 的 `/api/*`，**不再直读 `data/*.json`**�
 
 系统提示词约定：写线索分析结论时，额外输出一个 ```lead-analysis-card 代码块（JSON），前端会把它渲染成结构化卡片，而不是代码块。
 
-## 写操作（修改 / 删除）
+## 写操作（只能修改，不能删除）
 
-`tools_crm_write.py` 里的 4 个写工具同样是 HTTP 调 CRM，但多了三层保护：
+**Agent 不提供删除能力**：`crm_delete_lead` / `crm_delete_order` 不注册进 `TOOLS`，
+即使被重新注册，函数入口也有 `AGENT_DELETE_ENABLED = False` 兜底，直接返回 `FORBIDDEN` 并写审计。
+删除只能在 CRM 列表页由人工完成。
+
+`tools_crm_write.py` 里的写工具同样是 HTTP 调 CRM，但多了三层保护：
 
 1. **白名单补丁**：CRM 的 `PUT` 是 `{...old, ...body}` 全量覆盖，直接把模型给的 body 转发过去，
    模型就能顺手改 `id` / `createdAt` / `communicationCount`。因此只有 `_LEAD_PATCH` / `_ORDER_PATCH`
@@ -108,11 +113,43 @@ CRM 工具统一走 HTTP 调 CRM 的 `/api/*`，**不再直读 `data/*.json`**�
 定位目标记录支持两种写法：编号（`LD-2026-0002` / `ORD-20240105001`）或姓名。
 姓名匹配到多条时返回 `AMBIGUOUS` + 候选列表，提示词要求模型把候选列给用户选，**禁止自行挑一条或原样重试**。
 
-写工具的权限位是**修改 / 删除**而不是查看：销售角色只有 `leads.修改`，调用 `crm_delete_lead`
-会被本地拦下（`PERMISSION_DENIED`），即便绕过本地判断，CRM API 也会用 Bearer token 再校验一次。
+写工具的权限位是**修改**而不是查看：销售角色只有 `leads.修改` 时才能改，权限不足会返回
+`PERMISSION_DENIED`；即便绕过本地判断，CRM API 也会用 Bearer token 再校验一次。
 
-提示词层面还有一条「说清代价再动手」：删除或转移负责人前，先用一句话说明影响（删了就没有了 /
-转走你可能看不到）；含糊指令（「把没用的清理一下」）必须先列候选等用户确认。
+提示词层面还有一条「说清代价再动手」：转移负责人前先用一句话说明影响（转走你可能看不到）；
+含糊指令（「把没用的清理一下」）必须先列候选等用户确认。
+
+## 人工审批（修改类操作）
+
+修改类工具走框架自带的 `interrupt_on`（底层 langchain `HumanInTheLoopMiddleware`），
+策略集中在 `tools_guard.py`：
+
+| 操作 | 策略 |
+|---|---|
+| 查询（7 个只读工具 + calculator / get_current_time） | 不拦，直接执行 |
+| 修改（`crm_update_*`） | 暂停 → 前端弹审批卡 → 批准才执行，拒绝则工具不跑 |
+| 删除 | 工具不注册 + 入口 `FORBIDDEN`，双重拦截 |
+
+一轮流程：
+
+```
+POST /chat/stream        → SSE: ... token/tool ... → {"type":"approval_required", actions:[...]}
+                            → {"type":"paused"}    （不是结束，是等人）
+POST /chat/resume        → {"thread_id","decisions":[{"type":"approve"}]} → 继续流式输出
+                            decisions 顺序必须与 actions 的 index 一一对应（batched 模式按下标匹配）
+```
+
+要点：
+
+- 中断状态存在 `SqliteSaver` 里，进程重启后仍可继续批；
+- `GET /threads/{id}` 返回 `pending_approval`，切走会话 / 刷新回来能恢复审批卡；
+- pending 状态下同一 thread 发新消息会被挡下（`guard.PENDING_MESSAGE`），前端同时锁输入框；
+- 批准与否都写 `agent/data/audit.jsonl`（`action: "approval"`，含 `decision` / `reason` / `approved_by`）；
+- **审批不能替代权限**：批准后工具内部仍会校验权限位、数据范围与字段白名单。
+
+> 坑：`agent.stream(stream_mode=["messages","updates"])` 里 `__interrupt__` 的值是 `tuple`，
+> 老的循环 `if not isinstance(delta, dict): continue` 会把它静默丢掉，表现为「卡住、无回复、无报错」。
+> `app._stream_events` 现在先判 `__interrupt__` 再判类型。
 
 > CRM dev server 的一个坑：同一个 keep-alive 连接上第二次发非 GET 请求，Next dev（16.2.9 Turbopack）
 > 会回 308 且 `Location` 指向同一个 URL。`CrmClient` 因此固定 `Connection: close` 且不复用连接，
@@ -176,7 +213,7 @@ deep agent 自带 todo 拆解、文件系统、subagent 能力，这里只替换
 
 - 会话存储在单机 SQLite，多实例部署需要换 Postgres / Redis checkpointer。
 - 文件系统只在 `agent/workspace/<账号ID>/` 内活动，不提供 shell 执行能力（`execute` 工具会报错）。
-- 写操作目前靠「权限位 + 白名单 + 提示词约束 + 删除留底」控制，**还没挂 `interrupt_on` 人工审批**：
-  模型一旦决定调用就会直接落盘，前端没有二次确认弹窗。真正上线前建议接上审批中断。
+- 写操作已接 `interrupt_on` 人工审批（2026-11-04），删除能力已关闭；后续若要按角色裁剪工具（L1），
+  注意 `get_agent()` 的 `lru_cache` 键必须加上 `role_id`，否则不同角色会共用同一个 agent 实例。
 - `tool_data` 卡片不持久化，历史会话里只剩文字和工具行。
 - 会话归属依赖 Next 代理注入的 `user_id` / 身份头；绕过代理直连 3200 端口时没有鉴权，生产部署需把端口限制在 127.0.0.1。
