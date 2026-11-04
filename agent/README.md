@@ -39,8 +39,13 @@ cd agent && ./.venv/Scripts/python.exe app.py
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/health` | 健康检查，返回模型 ID、工具列表与存储类型 |
+| GET | `/health` | 健康检查，返回模型 ID、**实际可用工具**（已按控制面板过滤）、运行时长与配置版本 |
 | GET | `/tools` | 已注册工具 |
+| GET | `/config` | Agent 配置：系统提示词 + 工具开关 + 工具权限（**仅管理员**） |
+| PUT | `/config` | 部分更新：`{"system_prompt"? , "tools"?: {名字: {enabled, permission}}}`（**仅管理员**） |
+| POST | `/config/reset` | 恢复出厂配置（**仅管理员**） |
+| POST | `/config/test-model` | 发一次最小请求测模型连通性，返回延迟与 token（**仅管理员**） |
+| GET | `/metrics/overview?days=7` | 调用指标：今日 / 昨日 / 7 日趋势 / 工具榜（**仅管理员**） |
 | GET | `/whoami` | 回显代理注入的调用者身份（排查 `x-crm-*` 头是否透传） |
 | GET | `/sessions?user_id=` | 会话列表（按最近活跃时间倒序，默认不含空会话） |
 | POST | `/sessions` | 新建会话：`{"user_id": "..."}`，同时清理该用户无对话的空会话 |
@@ -118,6 +123,38 @@ CRM 工具统一走 HTTP 调 CRM 的 `/api/*`，**不再直读 `data/*.json`**�
 
 提示词层面还有一条「说清代价再动手」：转移负责人前先用一句话说明影响（转走你可能看不到）；
 含糊指令（「把没用的清理一下」）必须先列候选等用户确认。
+
+## Agent 控制面板（配置与指标）
+
+前端页面 `/agent-settings`，后端配套 `/config` 与 `/metrics/overview`。三样东西都可配：
+
+| 配置 | 存放 | 生效方式 |
+|---|---|---|
+| 系统提示词 | `agent/data/agent_config.json` 的 `system_prompt` | 覆盖 `prompts.SYSTEM_PROMPT`（出厂默认），下一次构建 agent 生效 |
+| 工具开关 | 同文件 `tools.<name>.enabled` | 关掉的工具**不注册给模型**，`/health` 的 `tools` 立刻少一个 |
+| 工具权限 | 同文件 `tools.<name>.permission` | `direct` 直接执行 / `approval` 进 `interrupt_on` / `forbidden` 同关闭 |
+
+实现要点：
+
+- `agent_config.py` 用 `REGISTRY` 做白名单，配置里出现未知工具直接 400，不做「静默忽略」；
+- **删除类工具锁死**：`locked=True`，无论配置怎么写都强制 `enabled=false / permission=forbidden`，
+  与 `tools_crm_write.AGENT_DELETE_ENABLED` 形成双重拦截；
+- 写入用「临时文件 + `os.replace`」原子替换，不会出现半截 JSON 把服务打挂；
+- 配置指纹（`revision`）参与 agent 缓存键：`@lru_cache _build_agent(workspace, revision)`，
+  改完配置下一次提问就是新实例，进行中的请求不受影响；
+- 接口一律 `can_manage(ctx)` 判定（「账号管理 → 修改」功能位），
+  前端隐藏入口只是体验，**后端才是边界**；
+- 断言兜底：`tools_guard` 里 `assert AGENT_DELETE_ENABLED is False`，防止有人图省事直接打开删除。
+
+指标落在 `agent/data/agent.db` 的 `chat_metrics` 表（与会话、checkpoint 同库）：
+
+| 列 | 含义 |
+|---|---|
+| `duration_ms` | 请求进入到 SSE 结束的墙钟时间 |
+| `prompt_tokens` / `completion_tokens` / `total_tokens` | 取自模型 `usage_metadata`；流式按消息 id 取最大值，避免累计值被重复相加 |
+| `tool_calls` / `tools` | 本轮工具调用个数与工具名（JSON 数组，用于控制面板的工具榜） |
+| `ok` / `error` | 失败也记一条，控制面板能看出「今天错了几轮」 |
+| `entry` | `chat`（新消息）或 `resume`（审批后继续），两者各算一次调用 |
 
 ## 人工审批（修改类操作）
 
@@ -213,7 +250,8 @@ deep agent 自带 todo 拆解、文件系统、subagent 能力，这里只替换
 
 - 会话存储在单机 SQLite，多实例部署需要换 Postgres / Redis checkpointer。
 - 文件系统只在 `agent/workspace/<账号ID>/` 内活动，不提供 shell 执行能力（`execute` 工具会报错）。
-- 写操作已接 `interrupt_on` 人工审批（2026-11-04），删除能力已关闭；后续若要按角色裁剪工具（L1），
-  注意 `get_agent()` 的 `lru_cache` 键必须加上 `role_id`，否则不同角色会共用同一个 agent 实例。
+- 写操作已接 `interrupt_on` 人工审批（2026-11-04），删除能力已关闭；配置缓存键已带上 `revision`，
+  后续若要按角色裁剪工具（L1），记得把 `role_id` 也拼进缓存键，否则不同角色会共用同一个 agent 实例。
+- 控制面板的指标是「按进程内 SQLite 累加」，多实例部署需要换成共享库或上报到监控系统。
 - `tool_data` 卡片不持久化，历史会话里只剩文字和工具行。
 - 会话归属依赖 Next 代理注入的 `user_id` / 身份头；绕过代理直连 3200 端口时没有鉴权，生产部署需把端口限制在 127.0.0.1。

@@ -133,9 +133,20 @@ BLOCKED_DELETE_TOOLS = {
 assert AGENT_DELETE_ENABLED is False, "删除工具当前必须保持关闭"
 
 
-def build_interrupt_on() -> dict[str, dict[str, Any]]:
-    """返回可直接传给 `create_deep_agent(interrupt_on=...)` 的配置。"""
-    return {name: dict(cfg) for name, cfg in INTERRUPT_ON.items()}
+def build_interrupt_on(approval_tools: set[str] | None = None) -> dict[str, dict[str, Any]]:
+    """返回可直接传给 `create_deep_agent(interrupt_on=...)` 的配置。
+
+    `approval_tools` 来自「Agent 控制面板」里权限=人工审批 的工具集合；
+    不传则退回硬编码的 `INTERRUPT_ON`（老行为，测试与脚本仍在用）。
+    """
+    names = set(INTERRUPT_ON) if approval_tools is None else set(approval_tools)
+    return {
+        name: {
+            "allowed_decisions": ["approve", "reject"],
+            "description": _describe,
+        }
+        for name in sorted(names)
+    }
 
 
 def needs_review(tool_name: str) -> bool:

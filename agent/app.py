@@ -4,8 +4,13 @@
     agent/.venv/Scripts/python.exe -m uvicorn app:app --app-dir agent --host 127.0.0.1 --port 3200
 
 接口：
-    GET    /health             健康检查（含模型信息）
+    GET    /health             健康检查（含模型信息 / 运行时长 / 配置版本）
     GET    /tools              已注册工具列表
+    GET    /config             Agent 配置（提示词 + 工具开关 + 权限，仅管理员）
+    PUT    /config             部分更新配置（提示词 / 工具开关 / 权限，仅管理员）
+    POST   /config/reset       恢复出厂配置（仅管理员）
+    POST   /config/test-model  模型连通性测试（仅管理员）
+    GET    /metrics/overview   调用指标：今日 / 昨日 / 7 日趋势 / 工具榜（仅管理员）
     GET    /whoami             回显调用者身份（排查 x-crm-* 头是否透传）
     GET    /sessions           会话列表（按最近活跃时间倒序）
     POST   /sessions           新建会话
@@ -25,6 +30,7 @@ import os
 import re
 import sqlite3
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -41,17 +47,22 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 from pydantic import BaseModel, Field
 
+import agent_config as cfg
+import metrics
 import tools_guard as guard
 from crm_client import CrmCtx
 from tools import TOOLS as BASE_TOOLS
 from tools_crm import CRM_TOOLS
 from tools_crm_write import CRM_UPDATE_TOOLS
 
-# 注册给模型的工具：通用工具 + CRM 只读工具 + CRM 修改工具。
-# 删除工具（crm_delete_lead / crm_delete_order）**刻意不注册**：
+# 可注册给模型的工具池：通用工具 + CRM 只读工具 + CRM 修改工具。
+# 删除工具（crm_delete_lead / crm_delete_order）**刻意不在池子里**：
 # 产品要求 Agent 不得删除数据，模型看不到工具就不会去调用；
 # 即使被误注册，工具入口还有 AGENT_DELETE_ENABLED 兜底。
+# 运行时还会按「Agent 控制面板」的开关再过滤一次（见 _build_agent）。
 TOOLS = [*BASE_TOOLS, *CRM_TOOLS, *CRM_UPDATE_TOOLS]
+
+STARTED_AT = time.time()
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
@@ -62,65 +73,6 @@ API_BASE = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com/v1")
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 DB_PATH = os.getenv("AGENT_DB_PATH", os.path.join(DATA_DIR, "agent.db"))
-
-SYSTEM_PROMPT = """你是一个严谨、简洁的中文智能助手，运行在本地部署的 DeepAgent 服务中，服务于一套 CRM 系统。
-
-## 数据纪律（最重要）
-1. 涉及线索 / 客户 / 订单 / 商品 / 沟通记录 / 统计的问题，必须先调用 crm_* 工具取真实数据，
-   严禁凭印象编造客户、金额或条数。
-2. 所有数字必须来自工具返回。工具没给的数字不要算、不要猜；需要求和或求占比时调用 calculator。
-3. 工具返回 ok=false 时如实转述 message：
-   - PERMISSION_DENIED：直接说「当前账号没有 XX 权限」，不得改用其他工具拼凑或推测；
-   - FORBIDDEN：说明 Agent 不提供这个能力（例如删除），不要改口说「系统不支持」；
-   - INVALID_ARGUMENT：按返回的 options 修正参数重试一次，仍失败就问用户；
-   - TIMEOUT / SERVICE_UNAVAILABLE：告诉用户 CRM 服务暂时不可用。
-4. 工具返回的 items 是摘要且受 limit 限制，条数要看 total，不要说「一共只有 N 条」。
-   需要单个客户的细节时再调 crm_get_lead / crm_get_lead_timeline。
-5. 用户说「我的」「我负责的」时不要传 assignee，服务端会按数据范围自动过滤。
-6. 手机号等敏感字段只用工具返回的脱敏值，不要尝试还原。
-
-## 写操作纪律（只能修改，不能删除）
-可用的写工具只有两个：`crm_update_lead`、`crm_update_order`。
-
-0. **你没有删除能力**。用户说要删线索 / 删订单时，直接回答「我不能删除数据，请在对应列表页
-   手动删除」，不要尝试用修改状态来冒充删除，也不要说「系统不支持删除」这种把责任推给系统的话。
-   被问到「能不能删」也一样：说明是 Agent 不提供删除能力，需要人工在页面操作。
-1. **每次修改都要人工确认**：调用修改工具后，界面会弹出审批卡，用户点「批准」才真正落库。
-   调用前用一句话说清要改什么（哪条记录、哪个字段、改成什么），不要长篇解释。
-   用户拒绝、或说「先别动」之后，不要重复发起同一处修改，也不要换个工具绕过去。
-   审批被拒绝时，如实说「已取消，数据没有改动」。
-2. `crm_update_lead` 能改的字段就这些：姓名、电话、客户来源、状态、优先级、负责人、
-   意向产品、预算区间、客户定位、试用时长、备注。用户要改的如果在这张表里，就直接改，
-   **不要回答「改不了」**；只有确实不在表里（例如线索编号、创建时间、沟通次数）才说明不可改。
-   电话是订单的关联键，改号后要提醒用户历史订单仍挂在旧号码上。
-3. **目标必须明确**：只有当用户在本轮明确提出要改，且能定位到具体一条记录时才动手。
-   能用编号就用编号；用户只给姓名时，工具会返回 AMBIGUOUS 和候选列表，
-   这时必须把候选（编号 + 姓名 + 负责人 + 当前状态）列给用户选，**不要自己挑一条，也不要原样重试**。
-4. **含糊指令先查后问**：用户说「帮我整理客户」「把没用的线索清一清」这类话时，
-   先查询并列出候选，等用户确认具体编号后再改，不要自行判断哪条该动。
-5. **一次一条**：不支持批量修改。用户要批量时，说明需要逐条确认，并把清单给出来。
-6. **只传要改的字段**：修改类工具没传的参数会保持原值，不要为了「填满」而重复传原值。
-7. **结果按实际说**：工具返回的 changed 是真正变化的字段，用「旧值 → 新值」简短汇报（值用中文说，
-   例如 low 说「低」、high 说「高」，不要直接念英文枚举）；
-   工具报 PERMISSION_DENIED 就直说没有修改权限，不要换工具重试，也不要声称已经改好。
-8. 写操作成功后不要重复罗列变更表格（卡片已经展示），一两句话总结即可。
-
-## 回答风格
-- 用自然中文先给结论再列要点，不要粘贴原始 JSON。
-- 线索 / 订单的明细已经以表格卡片的形式直接展示给用户了，
-  正文**不要重复罗列同样的表格**，用一两句话总结要点即可；需要对比或推导时再用 Markdown 表格。
-- 控制在 200 字以内，用户要求展开时才详细写。不确定就明说不确定。
-- 需要多步任务可用 todo 工具拆解；问时间用 get_current_time，算术用 calculator。
-
-## 线索分析卡片
-当用户要求「分析某条线索 / 客户」时，除了给一句简短结论，还要在回答末尾输出一个线索分析卡片，格式为：
-
-```lead-analysis-card
-{"customer":"客户姓名","leadId":"LD-2026-0001","intent":"high","intentProduct":"意向产品","budget":"预算区间","commCount":5,"lastCommDate":"2026-06-05","competitors":[{"name":"竞品名","attitude":"price_sensitive","quote":"客户原话"}],"actions":[{"title":"动作标题","detail":"具体做法"}]}
-```
-
-卡片字段要求：intent 只能是 high / medium / low；attitude 只能是 positive / neutral / negative / price_sensitive；没有竞品时给空数组；JSON 必须单行合法，不要在围栏里写注释或换行说明。
-"""
 
 app = FastAPI(title="DeepAgent Service", version="0.2.0")
 
@@ -275,9 +227,17 @@ def _workspace_name(user_id: str) -> str:
     return cleaned or "_shared"
 
 
-@lru_cache(maxsize=16)
 def get_agent(workspace: str = "_shared"):
-    """构建 deep agent（按工作目录缓存，对话状态落在 SQLite，重启不丢）。"""
+    """按「工作目录 + 当前配置版本」构建 deep agent。
+
+    配置（提示词 / 工具开关 / 权限）改完立刻生效：revision 变了就是新的缓存键，
+    旧实例留在 LRU 里等待淘汰，不影响已在进行中的请求。
+    """
+    return _build_agent(workspace, cfg.revision())
+
+
+@lru_cache(maxsize=32)
+def _build_agent(workspace: str, revision: str):
     if not API_KEY:
         raise RuntimeError("未配置 DEEPSEEK_API_KEY，请检查 agent/.env")
 
@@ -303,15 +263,20 @@ def create_agent_with(model: ChatDeepSeek, workspace: str = "_shared"):
     # 因此 agent/.env、项目 data/*.json 这些敏感文件读不到。
     backend = FilesystemBackend(root_dir=str(root), virtual_mode=True)
 
+    enabled = cfg.effective_tool_names()
+    approval = cfg.approval_tool_names()
+
     return create_deep_agent(
         model=model,
-        tools=TOOLS,
-        system_prompt=SYSTEM_PROMPT,
+        # 控制面板关掉的工具不进这个列表 —— 模型连工具名都看不到，
+        # 比「提示词劝它别用」可靠得多。
+        tools=[tool for tool in TOOLS if tool.name in enabled],
+        system_prompt=cfg.current_prompt(),
         checkpointer=checkpointer,
         backend=backend,
-        # 修改类工具每次调用都会暂停等人批（approve / reject），
+        # 权限=人工审批 的工具每次调用都会暂停等人批（approve / reject），
         # 中断点落在 checkpointer 里，进程重启也能接着批。
-        interrupt_on=guard.build_interrupt_on(),
+        interrupt_on=guard.build_interrupt_on(approval),
     )
 
 
@@ -368,6 +333,27 @@ def _tool_calls_of(message: BaseMessage) -> list[dict[str, Any]]:
         {"name": call.get("name"), "args": call.get("args", {}), "id": call.get("id")}
         for call in raw
     ]
+
+
+def _track_usage(store: dict[str, tuple[int, int, int]], message: BaseMessage) -> None:
+    """累加 token 用量，按消息 id 去重。
+
+    流式下同一条 AI 消息会切成很多 chunk，DeepSeek 只在最后一块带 usage，
+    但不同版本也可能每块都带（且是累计值）。所以按 id 取「最大值」而不是相加，
+    否则 token 会翻好几倍。
+    """
+    usage = getattr(message, "usage_metadata", None)
+    if not isinstance(usage, dict):
+        return
+    total = int(usage.get("total_tokens") or 0)
+    if total <= 0:
+        return
+    key = str(getattr(message, "id", "") or "stream")
+    prompt = int(usage.get("input_tokens") or 0)
+    completion = int(usage.get("output_tokens") or 0)
+    previous = store.get(key)
+    if previous is None or total >= previous[2]:
+        store[key] = (prompt, completion, total)
 
 
 def _tool_results(messages: list[BaseMessage]) -> dict[str, str]:
@@ -465,14 +451,133 @@ class SessionRename(BaseModel):
 # --------------------------------------------------------------------------- #
 @app.get("/health")
 def health() -> dict[str, Any]:
+    enabled = cfg.effective_tool_names()
     return {
         "status": "ok",
         "framework": "deepagents",
         "model": MODEL_ID,
         "api_base": API_BASE,
         "storage": "sqlite",
-        "tools": [tool.name for tool in TOOLS],
+        "uptime_s": int(time.time() - STARTED_AT),
+        "started_at": datetime.fromtimestamp(STARTED_AT).astimezone().isoformat(timespec="seconds"),
+        "config_revision": cfg.revision(),
+        # 这里回的是「模型实际能用的工具」，关掉的不会出现 —— 便于一眼确认配置生效
+        "tools": [tool.name for tool in TOOLS if tool.name in enabled],
+        "tools_total": len(TOOLS),
     }
+
+
+def _require_admin(ctx: CrmCtx) -> None:
+    """控制面板是管理员功能。前端隐藏入口只是体验，这里才是边界。"""
+    if not cfg.can_manage(ctx):
+        raise HTTPException(status_code=403, detail="只有系统管理员可以管理 Agent 配置")
+
+
+@app.get("/config")
+def get_config(
+    x_crm_context: str = Header(default=""),
+    x_crm_token: str = Header(default=""),
+    x_crm_user: str = Header(default=""),
+) -> dict[str, Any]:
+    ctx = _parse_identity(x_crm_context, x_crm_token, x_crm_user)
+    _require_admin(ctx)
+    return cfg.view()
+
+
+class ConfigUpdate(BaseModel):
+    system_prompt: str | None = Field(None, description="新的系统提示词；不传表示不改")
+    tools: dict[str, dict[str, Any]] | None = Field(
+        None, description='工具覆盖项，例如 {"crm_update_lead": {"enabled": true, "permission": "approval"}}'
+    )
+
+
+@app.put("/config")
+def put_config(
+    req: ConfigUpdate,
+    x_crm_context: str = Header(default=""),
+    x_crm_token: str = Header(default=""),
+    x_crm_user: str = Header(default=""),
+) -> dict[str, Any]:
+    ctx = _parse_identity(x_crm_context, x_crm_token, x_crm_user)
+    _require_admin(ctx)
+    if req.system_prompt is None and not req.tools:
+        raise HTTPException(status_code=400, detail="没有要更新的内容")
+
+    try:
+        return cfg.save(
+            system_prompt=req.system_prompt,
+            tools=req.tools,
+            updated_by=ctx.name or ctx.uid,
+        )
+    except cfg.ConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/config/reset")
+def post_config_reset(
+    x_crm_context: str = Header(default=""),
+    x_crm_token: str = Header(default=""),
+    x_crm_user: str = Header(default=""),
+) -> dict[str, Any]:
+    ctx = _parse_identity(x_crm_context, x_crm_token, x_crm_user)
+    _require_admin(ctx)
+    return cfg.reset(updated_by=ctx.name or ctx.uid)
+
+
+@app.post("/config/test-model")
+def post_test_model(
+    x_crm_context: str = Header(default=""),
+    x_crm_token: str = Header(default=""),
+    x_crm_user: str = Header(default=""),
+) -> dict[str, Any]:
+    """发一次最小请求验证模型连通性。返回体量小，够判断通不通、有多快。"""
+    ctx = _parse_identity(x_crm_context, x_crm_token, x_crm_user)
+    _require_admin(ctx)
+    if not API_KEY:
+        return {"ok": False, "message": "未配置 DEEPSEEK_API_KEY", "model": MODEL_ID}
+
+    probe = ChatDeepSeek(
+        model=MODEL_ID,
+        api_key=API_KEY,
+        api_base=API_BASE,
+        temperature=0,
+        max_tokens=16,
+        timeout=20,
+    )
+    started = time.perf_counter()
+    try:
+        reply = probe.invoke("连通性测试，请只回复：pong")
+    except Exception as exc:  # noqa: BLE001 - 连通性失败要把原因原样给管理员
+        return {
+            "ok": False,
+            "model": MODEL_ID,
+            "latency_ms": int((time.perf_counter() - started) * 1000),
+            "message": str(exc)[:300],
+        }
+
+    usage = getattr(reply, "usage_metadata", None) or {}
+    return {
+        "ok": True,
+        "model": MODEL_ID,
+        "latency_ms": int((time.perf_counter() - started) * 1000),
+        "reply": _text_of(reply)[:80],
+        "total_tokens": int(usage.get("total_tokens") or 0),
+        "checked_at": _now(),
+    }
+
+
+@app.get("/metrics/overview")
+def get_metrics(
+    days: int = 7,
+    x_crm_context: str = Header(default=""),
+    x_crm_token: str = Header(default=""),
+    x_crm_user: str = Header(default=""),
+) -> dict[str, Any]:
+    ctx = _parse_identity(x_crm_context, x_crm_token, x_crm_user)
+    _require_admin(ctx)
+    data = metrics.overview(days=min(max(days, 1), 30))
+    data["model"] = MODEL_ID
+    return data
 
 
 @app.get("/tools")
@@ -551,6 +656,7 @@ def chat(
 ) -> dict[str, Any]:
     ctx = _parse_identity(x_crm_context, x_crm_token, x_crm_user or req.user_id)
     config = _config(req.thread_id, ctx)
+    started_at = time.perf_counter()
     try:
         agent = get_agent(_workspace_name(ctx.uid or req.user_id))
         result = agent.invoke(
@@ -558,12 +664,31 @@ def chat(
             config=config,
         )
     except Exception as exc:  # noqa: BLE001 - 统一转成 502，便于前端展示
+        metrics.record(
+            duration_ms=int((time.perf_counter() - started_at) * 1000),
+            uid=ctx.uid or req.user_id,
+            thread_id=req.thread_id,
+            entry="chat",
+            model=MODEL_ID,
+            ok=False,
+            error=str(exc),
+        )
         raise HTTPException(status_code=502, detail=f"Agent 执行失败: {exc}") from exc
 
     messages = result.get("messages", [])
     session = _sync_session(req.thread_id, messages, ctx.uid or req.user_id)
 
     payload = _summarize(messages)
+    metrics.record(
+        duration_ms=int((time.perf_counter() - started_at) * 1000),
+        uid=ctx.uid or req.user_id,
+        thread_id=req.thread_id,
+        entry="chat",
+        total_tokens=int(payload.get("total_tokens") or 0),
+        tools=[str(call.get("name") or "") for call in payload.get("tool_calls") or []],
+        model=MODEL_ID,
+        ok=True,
+    )
     payload["thread_id"] = req.thread_id
     payload["session"] = session
     # 非流式入口遇到修改类工具时也会中断：把待审批内容一并回传，
@@ -611,13 +736,23 @@ def _stream_events(
     thread_id: str,
     user_id: str,
     sink: list[dict[str, Any]],
+    *,
+    entry: str = "chat",
+    started_at: float | None = None,
+    ctx: CrmCtx | None = None,
 ) -> Iterator[str]:
     """把一轮执行翻成 SSE。
 
     `/chat/stream`（新消息）与 `/chat/resume`（审批后继续）共用这一段，
     保证两条入口的事件协议完全一致，前端只需实现一套渲染。
+    结束时把耗时 / token / 工具调用记进 `chat_metrics`（控制面板的数据来源）。
     """
     paused = False
+    ok = True
+    error_text = ""
+    usage: dict[str, tuple[int, int, int]] = {}
+    called: list[str] = []
+
     try:
         # 同时订阅两种流：
         #   messages → 逐 token 增量，前端可像打字机一样渲染
@@ -628,6 +763,7 @@ def _stream_events(
                 # 只把 AI 的正文当 token 推：工具返回（ToolMessage）走下面的 tool 事件，
                 # 否则原始 JSON / 英文拒绝语会先闪一下再被正文覆盖。
                 if isinstance(token, AIMessage):
+                    _track_usage(usage, token)
                     text = _text_of(token)
                     if text:
                         yield _sse(
@@ -659,6 +795,12 @@ def _stream_events(
                 for message in delta.get("messages", []) or []:
                     if not isinstance(message, BaseMessage):
                         continue
+                    if isinstance(message, AIMessage):
+                        _track_usage(usage, message)
+                        for call in _tool_calls_of(message):
+                            name = str(call.get("name") or "")
+                            if name:
+                                called.append(name)
                     event: dict[str, Any] = {
                         "node": node,
                         "type": message.type,
@@ -674,8 +816,26 @@ def _stream_events(
                 for card in _drain(sink):
                     yield _sse({"type": "tool_data", **card})
     except Exception as exc:  # noqa: BLE001 - SSE 内无法改状态码，用事件告知
+        ok, error_text = False, str(exc)
         yield _sse({"type": "error", "content": f"{exc}"})
         return
+    finally:
+        prompt_tokens = sum(item[0] for item in usage.values())
+        completion_tokens = sum(item[1] for item in usage.values())
+        total_tokens = sum(item[2] for item in usage.values())
+        metrics.record(
+            duration_ms=int((time.perf_counter() - started_at) * 1000) if started_at else 0,
+            uid=getattr(ctx, "uid", "") or user_id,
+            thread_id=thread_id,
+            entry=entry,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            tools=called,
+            model=MODEL_ID,
+            ok=ok,
+            error=error_text,
+        )
 
     # 本轮结束或暂停都要刷新会话索引（标题 / 轮数 / 活跃时间）
     try:
@@ -711,11 +871,21 @@ def chat_stream(
     workspace = _workspace_name(ctx.uid or req.user_id)
     user_id = ctx.uid or req.user_id
     sink: list[dict[str, Any]] = []
+    started_at = time.perf_counter()
 
     def event_source() -> Iterator[str]:
         try:
             agent = get_agent(workspace)
         except Exception as exc:  # noqa: BLE001
+            metrics.record(
+                duration_ms=int((time.perf_counter() - started_at) * 1000),
+                uid=user_id,
+                thread_id=req.thread_id,
+                entry="chat",
+                model=MODEL_ID,
+                ok=False,
+                error=str(exc),
+            )
             yield _sse({"type": "error", "content": f"{exc}"})
             return
 
@@ -732,6 +902,9 @@ def chat_stream(
             req.thread_id,
             user_id,
             sink,
+            entry="chat",
+            started_at=started_at,
+            ctx=ctx,
         )
 
     return _streaming_response(event_source())
@@ -761,6 +934,7 @@ def chat_resume(
     user_id = ctx.uid or req.user_id
     sink: list[dict[str, Any]] = []
 
+    started_at = time.perf_counter()
     decisions = [item.model_dump() for item in req.decisions]
     if not decisions:
         raise HTTPException(status_code=400, detail="decisions 不能为空")
@@ -808,6 +982,9 @@ def chat_resume(
             req.thread_id,
             user_id,
             sink,
+            entry="resume",
+            started_at=started_at,
+            ctx=ctx,
         )
 
     return _streaming_response(event_source())

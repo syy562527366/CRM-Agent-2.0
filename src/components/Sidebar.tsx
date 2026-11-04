@@ -4,6 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { useAuth } from "@/context/AuthContext";
 import { canAccessPage } from "@/hooks/usePermission";
+import { canManageAgent } from "@/types/agentConfig";
 import UserCenterModal from "./UserCenterModal";
 
 interface SidebarProps {
@@ -101,6 +102,8 @@ export default function Sidebar({ activeItem }: SidebarProps) {
   // 根据角色权限过滤导航项
   const visibleNavItems = navItems.filter((item) => canAccessPage(role, item.key));
   const canUseAgent = canAccessPage(role, "agent");
+  // 控制面板会改 Agent 的行为边界，只给系统管理员（账号管理 → 修改）
+  const canManage = canManageAgent(role);
 
   return (
     <aside className="w-60 min-w-60 bg-[#0F172A] flex flex-col h-screen sticky top-0 overflow-y-auto">
@@ -143,6 +146,24 @@ export default function Sidebar({ activeItem }: SidebarProps) {
                 AI
               </span>
             </Link>
+            {canManage && (
+              <Link
+                href="/agent-settings"
+                className={`flex items-center gap-3 px-3.5 py-2.5 rounded-lg text-sm font-medium transition-all duration-150 cursor-pointer mb-0.5 relative ${
+                  activeItem === "agent-settings"
+                    ? "bg-blue-500/15 text-blue-400 before:absolute before:left-[-12px] before:top-1/2 before:-translate-y-1/2 before:w-[3px] before:h-5 before:bg-blue-500 before:rounded-r"
+                    : "text-slate-500 hover:bg-white/5 hover:text-slate-300"
+                }`}
+              >
+                <span className={`w-5 h-5 shrink-0 ${activeItem === "agent-settings" ? "opacity-100" : "opacity-80"}`}>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="3" />
+                    <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" />
+                  </svg>
+                </span>
+                <span>Agent 控制面板</span>
+              </Link>
+            )}
           </>
         )}
 
