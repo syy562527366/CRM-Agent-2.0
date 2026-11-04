@@ -608,25 +608,6 @@
     "idCard": "420106196604252022"
   },
   {
-    "id": "LD-2026-0033",
-    "createdAt": "2026-06-12 23:59",
-    "name": "江小波",
-    "phone": "13765432106",
-    "priority": "low",
-    "source": "线下海报",
-    "assignee": "王芳",
-    "email": "jiangxb@email.com",
-    "status": "价格异议",
-    "lastFollowUpAt": "2026-06-10 14:23",
-    "intentProduct": "C端课",
-    "budgetRange": "1500-2500元",
-    "remark": "觉得性价比不高",
-    "customerPosition": "其他",
-    "trialDuration": 40,
-    "communicationCount": 3,
-    "idCard": "420106196707268908"
-  },
-  {
     "id": "LD-2026-0034",
     "createdAt": "2026-06-12 07:59",
     "name": "许小雪",
