@@ -66,14 +66,14 @@ export function searchLeads(filter: LeadFilter = {}): Lead[] {
     return true;
   });
 
-  if (!filter.sort) return rows;
-
-  const field = filter.sort;
+  // 默认按创建时间倒序（最新的在前）；调用方显式传 sort 时以其为准
+  const field = filter.sort ?? "createdAt";
   const direction = filter.order === "asc" ? 1 : -1;
   return [...rows].sort((a, b) => {
     const av = a[field];
     const bv = b[field];
     if (typeof av === "number" && typeof bv === "number") return (av - bv) * direction;
+    // createdAt / lastFollowUpAt 都是 "YYYY-MM-DD HH:mm" 格式，字典序即时间序
     return String(av ?? "").localeCompare(String(bv ?? "")) * direction;
   });
 }
