@@ -117,6 +117,8 @@ export default function CommunicationsDashboard() {
             <select value={filters.channel} onChange={(e) => handleFilterChange("channel", e.target.value)} style={{ padding: "7px 10px", border: "1px solid #E2E8F0", borderRadius: 8, fontSize: 13, fontFamily: "inherit", color: "#1E293B", background: "#fff", outline: "none", cursor: "pointer" }}>
               <option value="">全部</option>
               <option value="微信">微信</option>
+              <option value="电话">电话</option>
+              <option value="邮件">邮件</option>
               <option value="QQ">QQ</option>
             </select>
           </div>

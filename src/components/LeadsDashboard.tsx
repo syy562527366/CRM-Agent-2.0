@@ -25,7 +25,8 @@ const AVATAR_COLORS = [
 
 const SOURCE_OPTIONS = ["官网咨询", "百度推广", "展会活动", "朋友圈广告", "转介绍", "行业峰会"];
 
-const ASSIGNEE_OPTIONS = ["李思琪", "陈伟杰", "赵雪梅", "孙雅文", "周晨阳"];
+// 必须与 accounts.json 里的销售账号一致，否则编辑线索时跟进人下拉选不到当前值
+const ASSIGNEE_OPTIONS = ["张明", "李华", "王芳", "刘强", "陈静"];
 
 /* ========== 输入框样式 ========== */
 const INPUT_STYLE: React.CSSProperties = {
@@ -109,7 +110,7 @@ export default function LeadsDashboard() {
 
   // ---- 编辑表单数据 ----
   const [editForm, setEditForm] = useState({ name: "", phone: "", priority: "" as Priority | "", source: "", assignee: "" });
-  const [addForm, setAddForm] = useState<CreateLeadRequest>({ name: "", phone: "", priority: "medium", source: "官网咨询", assignee: "李思琪" });
+  const [addForm, setAddForm] = useState<CreateLeadRequest>({ name: "", phone: "", priority: "medium", source: "官网咨询", assignee: "张明" });
 
   // ---- 数据加载 ----
   const fetchLeads = useCallback(async () => {
@@ -204,7 +205,7 @@ export default function LeadsDashboard() {
       body: JSON.stringify(addForm),
     });
     setShowAddModal(false);
-    setAddForm({ name: "", phone: "", priority: "medium", source: "官网咨询", assignee: "李思琪" });
+    setAddForm({ name: "", phone: "", priority: "medium", source: "官网咨询", assignee: "张明" });
     setPage(1);
     fetchLeads();
   };

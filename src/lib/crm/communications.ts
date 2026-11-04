@@ -26,7 +26,7 @@ export function findCommunication(id: string): Communication | undefined {
 
 export function searchCommunications(filter: CommunicationFilter = {}): Communication[] {
   const dayOf = (value?: string) => (value ? value.split(" ")[0] : "");
-  return readCommunications().filter((row) => {
+  const rows = readCommunications().filter((row) => {
     if (filter.leadId && row.leadId !== filter.leadId) return false;
     if (filter.leadIds && !filter.leadIds.includes(row.leadId)) return false;
     if (filter.senderRole && row.senderRole !== filter.senderRole) return false;
@@ -35,6 +35,9 @@ export function searchCommunications(filter: CommunicationFilter = {}): Communic
     if (filter.endDate && dayOf(row.sentAt) > filter.endDate) return false;
     return true;
   });
+
+  // 倒序：列表页文案是「按时间倒序展示」，Agent 的时间线工具取前 N 条也应当是「最近 N 条」
+  return rows.sort((a, b) => String(b.sentAt ?? "").localeCompare(String(a.sentAt ?? "")));
 }
 
 /** 按线索分组统计沟通次数，线索列表页的「沟通次数」由此派生 */
