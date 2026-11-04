@@ -122,9 +122,29 @@ export default function Sidebar({ activeItem }: SidebarProps) {
 
       {/* Navigation */}
       <nav className="px-3 py-3 flex-1">
+        <div className="text-[11px] font-semibold text-slate-600 uppercase tracking-widest px-3 pb-1.5 pt-1">
+          业务管理
+        </div>
+        {visibleNavItems.map((item) => (
+          <Link
+            key={item.key}
+            href={item.href}
+            className={`flex items-center gap-3 px-3.5 py-2.5 rounded-lg text-sm font-medium transition-all duration-150 cursor-pointer mb-0.5 relative ${
+              activeItem === item.key
+                ? "bg-blue-500/15 text-blue-400 before:absolute before:left-[-12px] before:top-1/2 before:-translate-y-1/2 before:w-[3px] before:h-5 before:bg-blue-500 before:rounded-r"
+                : "text-slate-500 hover:bg-white/5 hover:text-slate-300"
+            }`}
+          >
+            <span className={`w-5 h-5 shrink-0 ${activeItem === item.key ? "opacity-100" : "opacity-80"}`}>
+              {item.icon}
+            </span>
+            <span>{item.label}</span>
+          </Link>
+        ))}
+
         {canUseAgent && (
           <>
-            <div className="text-[11px] font-semibold text-slate-600 uppercase tracking-widest px-3 pb-1.5 pt-1">
+            <div className="text-[11px] font-semibold text-slate-600 uppercase tracking-widest px-3 pb-1.5 pt-4">
               智能助手
             </div>
             <Link
@@ -166,26 +186,6 @@ export default function Sidebar({ activeItem }: SidebarProps) {
             )}
           </>
         )}
-
-        <div className="text-[11px] font-semibold text-slate-600 uppercase tracking-widest px-3 pb-1.5 pt-4">
-          业务管理
-        </div>
-        {visibleNavItems.map((item) => (
-          <Link
-            key={item.key}
-            href={item.href}
-            className={`flex items-center gap-3 px-3.5 py-2.5 rounded-lg text-sm font-medium transition-all duration-150 cursor-pointer mb-0.5 relative ${
-              activeItem === item.key
-                ? "bg-blue-500/15 text-blue-400 before:absolute before:left-[-12px] before:top-1/2 before:-translate-y-1/2 before:w-[3px] before:h-5 before:bg-blue-500 before:rounded-r"
-                : "text-slate-500 hover:bg-white/5 hover:text-slate-300"
-            }`}
-          >
-            <span className={`w-5 h-5 shrink-0 ${activeItem === item.key ? "opacity-100" : "opacity-80"}`}>
-              {item.icon}
-            </span>
-            <span>{item.label}</span>
-          </Link>
-        ))}
       </nav>
 
       {/* User */}
