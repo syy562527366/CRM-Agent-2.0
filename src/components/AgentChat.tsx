@@ -72,6 +72,29 @@ const SUGGESTIONS = [
 
 /* ========== 工具函数 ========== */
 
+/**
+ * 把 HTTP 状态翻成可执行的中文提示。
+ *
+ * 502/503 几乎只有一个原因：3200 的 Agent 进程没在跑（代理转发失败），
+ * 所以文案直接给出启动命令，而不是让用户去猜「服务返回 502」是什么意思。
+ */
+function explainStatus(status: number): string {
+  if (status === 502 || status === 503 || status === 504) {
+    return (
+      "Agent 服务没有响应（127.0.0.1:3200 未启动）。\n\n" +
+      "在项目根目录双击 `start-all.cmd`，或手动执行：\n\n" +
+      "```bash\ncd agent && ./.venv/Scripts/python.exe app.py\n```"
+    );
+  }
+  if (status === 401) {
+    return "登录状态已失效，请刷新页面重新登录 CRM 后再试。";
+  }
+  if (status === 403) {
+    return "当前账号没有使用 AI 助手的权限，请联系管理员开通「AI 助手」页面权限。";
+  }
+  return `Agent 服务返回 ${status}，请查看 agent 终端日志排查。`;
+}
+
 function nowTime(): string {
   const d = new Date();
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
@@ -400,11 +423,12 @@ export default function AgentChat() {
           });
         } else {
           const detail = err instanceof Error ? err.message : String(err);
+          // "服务返回 502" 这类原始状态码对用户没有意义，换成可执行的建议
+          const status = Number(detail.match(/服务返回 (\d{3})/)?.[1] ?? 0);
           patchMessage(agentMsg.id, {
-            content:
-              `无法连接 Agent 服务：${detail}\n\n` +
-              "请确认服务已启动：\n\n" +
-              "```bash\ncd agent && ./.venv/Scripts/python.exe app.py\n```",
+            content: status
+              ? explainStatus(status)
+              : `无法连接 Agent 服务：${detail}\n\n请确认服务已启动（127.0.0.1:3200）。`,
             error: true,
           });
         }
@@ -455,11 +479,14 @@ export default function AgentChat() {
     } catch (err) {
       if (ticket !== historySeqRef.current) return;
       const detail = err instanceof Error ? err.message : String(err);
+      const status = Number(detail.match(/服务返回 (\d{3})/)?.[1] ?? 0);
       setMessages([
         {
           id: nextId(),
           role: "agent",
-          content: `加载会话记录失败：${detail}\n\n请确认 Agent 服务已启动（127.0.0.1:3200）。`,
+          content: status
+            ? explainStatus(status)
+            : `加载会话记录失败：${detail}\n\n请确认 Agent 服务已启动（127.0.0.1:3200）。`,
           tools: [],
           cards: [],
           error: true,

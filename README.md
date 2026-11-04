@@ -36,7 +36,9 @@ npm run dev        # http://127.0.0.1:3100
 cd agent && ./.venv/Scripts/python.exe app.py   # http://127.0.0.1:3200
 ```
 
-前端通过 `next.config.ts` 的 rewrite 把 `/agent-api/*` 反向代理到该服务（默认 `http://127.0.0.1:3200`，可用环境变量 `AGENT_SERVICE_URL` 覆盖），因此浏览器端不涉及跨域。Agent 未启动时页面顶部状态点会变红并提示"服务未连接"，其余 CRM 功能不受影响。
+Windows 下也可以直接双击项目根目录的 **`start-all.cmd`**，它会为 CRM 和 Agent 各开一个窗口，两个窗口都保持打开即可（关掉窗口等于停服务）。
+
+前端通过 `src/app/agent-api/[...path]/route.ts` 这个 Route Handler 反向代理到该服务（默认 `http://127.0.0.1:3200`，可用环境变量 `AGENT_SERVICE_URL` 覆盖）：未登录直接 401 且不转发，登录后注入 `x-crm-user` / `x-crm-token` / `x-crm-context` 三个身份头，Agent 侧据此按当前账号的权限和数据范围取数。Agent 未启动时请求返回 502，页面会提示启动命令；其余 CRM 功能不受影响。
 
 ## 目录结构
 
