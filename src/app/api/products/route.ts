@@ -15,7 +15,7 @@ import { paginate } from "@/lib/crm/store";
  *   category   - 类别精确筛选（CBAM 合规 / 碳核算核查 / …）
  *   status     - 上架 / 下架，不传表示全部
  *   page       - 页码（默认 1）
- *   pageSize   - 每页条数（默认 5）
+ *   pageSize   - 每页条数（默认 10）
  */
 export async function GET(request: NextRequest) {
   const auth = authorize(request, "products", "查看");
@@ -33,7 +33,7 @@ export async function GET(request: NextRequest) {
     status: status === "上架" || status === "下架" ? status : undefined,
   });
 
-  const paged = paginate(rows, Number(searchParams.get("page") ?? 1), Number(searchParams.get("pageSize") ?? 5));
+  const paged = paginate(rows, Number(searchParams.get("page") ?? 1), Number(searchParams.get("pageSize") ?? 10));
 
   return NextResponse.json({
     data: paged.rows,

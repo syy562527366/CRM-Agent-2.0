@@ -18,7 +18,7 @@ import { paginate } from "@/lib/crm/store";
  *   productName  - 商品名称模糊搜索
  *   options      - 为 true 时返回新增表单所需的下拉选项
  *   page         - 页码（默认 1）
- *   pageSize     - 每页条数（默认 5）
+ *   pageSize     - 每页条数（默认 10）
  */
 export async function GET(request: NextRequest) {
   const auth = authorize(request, "orders", "查看");
@@ -52,7 +52,7 @@ export async function GET(request: NextRequest) {
     productName: searchParams.get("productName") ?? undefined,
   });
 
-  const paged = paginate(rows, Number(searchParams.get("page") ?? 1), Number(searchParams.get("pageSize") ?? 5));
+  const paged = paginate(rows, Number(searchParams.get("page") ?? 1), Number(searchParams.get("pageSize") ?? 10));
 
   return NextResponse.json({
     data: paged.rows,

@@ -19,7 +19,7 @@ import { paginate } from "@/lib/crm/store";
  *   assignee  - 负责人精确筛选（数据范围「仅自己」时会被强制覆盖）
  *   keyword   - 编号 / 姓名 / 手机号模糊搜索
  *   page      - 页码（默认 1）
- *   pageSize  - 每页条数（默认 5）
+ *   pageSize  - 每页条数（默认 10）
  */
 export async function GET(request: NextRequest) {
   const auth = authorize(request, "leads", "查看");
@@ -52,7 +52,7 @@ export async function GET(request: NextRequest) {
   });
 
   const page = Number(searchParams.get("page") ?? 1);
-  const pageSize = Number(searchParams.get("pageSize") ?? 5);
+  const pageSize = Number(searchParams.get("pageSize") ?? 10);
   const paged = paginate(rows, page, pageSize);
 
   return NextResponse.json({

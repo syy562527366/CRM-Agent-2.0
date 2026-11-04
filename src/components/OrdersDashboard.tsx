@@ -64,7 +64,7 @@ export default function OrdersDashboard() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
-  const [pageSize] = useState(5);
+  const [pageSize] = useState(10);
   const [loading, setLoading] = useState(false);
 
   // ---- 表单选项数据（线索 + 商品） ----
