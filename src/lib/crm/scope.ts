@@ -49,7 +49,7 @@ export function isOwnOnly(scope: CrmScope, pageKey: string): boolean {
 
 /**
  * 线索的数据范围过滤条件。
- * 线索的 assignee 与账号 name 同名（张明/李华/…），因此「仅自己」= assignee 等于本人姓名。
+ * 线索的 assignee 与账号 name 同名（万靖/高兵/…），因此「仅自己」= assignee 等于本人姓名。
  */
 export function leadScopeFilter(scope: CrmScope): { assignee?: string } {
   return isOwnOnly(scope, "leads") ? { assignee: scope.name } : {};

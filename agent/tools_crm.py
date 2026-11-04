@@ -126,7 +126,7 @@ def crm_search_leads(
         priority: 意向优先级：high / medium / low。留空不限。
         source: 客户来源，例如「抖音」「官网」。留空不限。
         keyword: 按客户姓名 / 线索编号 / 手机号模糊搜索。留空不限。
-        assignee: 负责人姓名，例如「张明」。留空表示不限（数据范围「仅自己」时会被强制为本机账号）。
+        assignee: 负责人姓名，例如「万靖」。留空表示不限（数据范围「仅自己」时会被强制为本机账号）。
         date_from: 创建日期下限，格式 YYYY-MM-DD。留空不限。
         date_to: 创建日期上限，格式 YYYY-MM-DD。留空不限。
         sort: 排序字段：lastFollowUpAt（最近跟进）/ createdAt（创建时间）/ communicationCount（沟通次数），默认 lastFollowUpAt。

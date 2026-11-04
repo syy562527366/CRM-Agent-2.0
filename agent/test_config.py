@@ -59,7 +59,7 @@ def admin_ctx() -> CrmCtx:
 def sales_ctx() -> CrmCtx:
     return CrmCtx(
         uid="ACCT-2026-0002",
-        name="张明",
+        name="万靖",
         role_id="ROLE-2026-0002",
         role_name="销售",
         permissions=(

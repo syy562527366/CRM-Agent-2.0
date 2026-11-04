@@ -12,7 +12,7 @@
     "id": "ACCT-2026-0002",
     "createdAt": "2026-06-01 00:00",
     "phone": "13800001001",
-    "name": "张明",
+    "name": "万靖",
     "roleId": "ROLE-2026-0002",
     "roleName": "销售",
     "password": "123123"
@@ -21,7 +21,7 @@
     "id": "ACCT-2026-0003",
     "createdAt": "2026-06-01 00:00",
     "phone": "13800001002",
-    "name": "李华",
+    "name": "高兵",
     "roleId": "ROLE-2026-0002",
     "roleName": "销售",
     "password": "123123"
@@ -30,7 +30,7 @@
     "id": "ACCT-2026-0004",
     "createdAt": "2026-06-01 00:00",
     "phone": "13800001003",
-    "name": "王芳",
+    "name": "董浩宇",
     "roleId": "ROLE-2026-0002",
     "roleName": "销售",
     "password": "123123"
@@ -39,7 +39,7 @@
     "id": "ACCT-2026-0005",
     "createdAt": "2026-06-01 00:00",
     "phone": "13800001004",
-    "name": "刘强",
+    "name": "李娜",
     "roleId": "ROLE-2026-0002",
     "roleName": "销售",
     "password": "123123"
@@ -48,7 +48,7 @@
     "id": "ACCT-2026-0006",
     "createdAt": "2026-06-01 00:00",
     "phone": "13800001005",
-    "name": "陈静",
+    "name": "何南",
     "roleId": "ROLE-2026-0002",
     "roleName": "销售",
     "password": "123123"

@@ -30,7 +30,7 @@
 
 线索状态实际取值：`成交(20) / 客户流失(6) / 未接触(5) / 长期未跟进(2) / 推荐产品(1) / 价格异议(1)`；
 优先级：`high(14) / medium(14) / low(7)`。
-线索的 `assignee`（张明/李华/王芳/刘强/陈静）与账号 `name` **完全同名**，这是「仅自己」数据范围的落地点。
+线索的 `assignee`（万靖/高兵/董浩宇/李娜/何南）与账号 `name` **完全同名**，这是「仅自己」数据范围的落地点。
 
 ### 1.2 现有 API
 
@@ -331,7 +331,7 @@ def parse_ctx(raw: str) -> dict:
 `GET /agent-api/whoami` → 回显解析后的身份，确认头真的传到了：
 
 ```json
-{"user":"ACCT-2026-0002","name":"张明","role_name":"销售",
+{"user":"ACCT-2026-0002","name":"万靖","role_name":"销售",
  "permissions":[{"pageKey":"leads","functions":["查看","修改","增加"],"dataScope":"全部"}],
  "has_token":true,"token_length":130}
 ```
@@ -358,7 +358,7 @@ GET /api/stats?domain=sales&groupBy=product&startDate=&endDate=
 {"type":"tool_data","tool":"crm_search_leads","kind":"lead_table","title":"客户线索",
  "columns":["id","name","status","priority","assignee","lastFollowUpAt"],
  "rows":[{"id":"LD-2026-0001","name":"王小明","status":"成交","priority":"high",
-          "assignee":"张明","lastFollowUpAt":"2026-06-05 06:23"}],
+          "assignee":"万靖","lastFollowUpAt":"2026-06-05 06:23"}],
  "total":35}
 ```
 

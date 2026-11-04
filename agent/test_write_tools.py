@@ -132,7 +132,7 @@ def main() -> int:
             resp = api.post(
                 "/api/leads",
                 json={"name": "测试同名", "phone": f"1370000{i:04d}", "priority": "low",
-                      "source": "抖音", "assignee": "张明"},
+                      "source": "抖音", "assignee": "万靖"},
             )
             if resp.status_code not in (200, 201):
                 print(f"创建线索失败 HTTP {resp.status_code}: {resp.text[:120]}")

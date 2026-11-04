@@ -24,10 +24,10 @@ results: list[tuple[str, bool, str]] = []
 # 与 CRM 的 src/lib/auth/session.ts 共用同一套签名规则（本地开发默认密钥）
 SESSION_SECRET = os.getenv("CRM_SESSION_SECRET", "crm-local-dev-secret-please-override")
 
-# 销售角色（张明）的权限快照，生产环境这段应由 Next 代理注入，测试里手工模拟
+# 销售角色（万靖）的权限快照，生产环境这段应由 Next 代理注入，测试里手工模拟
 SALES_CTX = {
     "uid": "ACCT-2026-0002",
-    "name": "张明",
+    "name": "万靖",
     "roleId": "ROLE-2026-0002",
     "roleName": "销售",
     "permissions": [
@@ -125,7 +125,7 @@ def main() -> int:
     headers = crm_headers()
     try:
         me = requests.get(f"{BASE_URL}/whoami", headers=headers, timeout=20).json()
-        ok = me.get("name") == "张明" and me.get("role_name") == "销售"
+        ok = me.get("name") == "万靖" and me.get("role_name") == "销售"
         check("身份头解析 /whoami", ok, f"{me.get('name')} / {me.get('role_name')}")
     except Exception as exc:  # noqa: BLE001
         check("身份头解析 /whoami", False, str(exc))
