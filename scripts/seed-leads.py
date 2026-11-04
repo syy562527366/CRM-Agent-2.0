@@ -163,6 +163,10 @@ LEGACY_SOURCE_MAP = {
 LEGACY_INTENT_MAP = {
     "AI课": "AI 与数字化转型企业培训",
     "B端课": "双碳培训",
+    # 商品目录里没有「入门课 / C端课」这两个服务，归到实际的定制培训商品，
+    # 否则线索成交后开单时选不到对应商品
+    "入门课": "培训（定制课）",
+    "C端课": "培训（定制课）",
 }
 
 # 状态 → 跟进跨度（天）。实际沟通条数由话术模板决定，两者共同决定时间轴疏密。
@@ -206,13 +210,15 @@ def work_hour(dt: datetime) -> datetime:
     return dt
 
 
-def followup_window(created: datetime, status: str, count: int):
+def followup_window(created: datetime, status: str, count: int, spread: int = 0):
     span = FOLLOWUP_SPAN[status]
     if count == 0:
         return created, []
     end = created + timedelta(days=span)
     if end > TODAY:
-        end = TODAY - timedelta(hours=1)
+        # 跟进跨度超出今天时压回近期。按序号错开 0~4 天，否则多条在谈线索的
+        # 「最后跟进」会全部落在同一刻，跟进记录和据此开出的订单都会挤在同一天
+        end = TODAY - timedelta(hours=1) - timedelta(days=spread % 5, hours=(spread * 3) % 7)
     if end <= created:
         end = created + timedelta(hours=2)
     step = (end - created) / (count - 1) if count > 1 else timedelta(0)
@@ -383,7 +389,7 @@ def build():
         thread = trim_thread(
             dialogue(name, assignee, intent, remark, status, source, budget, index), status
         )
-        end, slots = followup_window(created, status, len(thread))
+        end, slots = followup_window(created, status, len(thread), index)
 
         lead = {
             "id": lead_id,

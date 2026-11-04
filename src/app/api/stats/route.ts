@@ -3,6 +3,7 @@ import { authorize } from "@/lib/auth/session";
 import {
   LEAD_GROUP_BY,
   SALES_GROUP_BY,
+  dashboardOverview,
   leadStats,
   salesStats,
   type LeadGroupBy,
@@ -13,7 +14,7 @@ import {
  * GET /api/stats - 聚合统计（供仪表盘与 Agent 工具共用）
  *
  * 查询参数：
- *   domain    - leads（线索）| sales（销售），默认 leads
+ *   domain    - overview（仪表盘概览）| leads（线索）| sales（销售），默认 leads
  *   groupBy   - leads: status / source / assignee / priority
  *               sales: product / assignee / month
  *   startDate - 开始日期 (YYYY-MM-DD)
@@ -26,6 +27,16 @@ export async function GET(request: NextRequest) {
   const domain = searchParams.get("domain") ?? "leads";
   const startDate = searchParams.get("startDate") ?? undefined;
   const endDate = searchParams.get("endDate") ?? undefined;
+
+  if (domain === "overview") {
+    // 概览同时含线索与订单数据，两项权限都要有
+    const leadAuth = authorize(request, "leads", "查看");
+    if (!leadAuth.ok) return leadAuth.response;
+    const orderAuth = authorize(request, "orders", "查看");
+    if (!orderAuth.ok) return orderAuth.response;
+
+    return NextResponse.json(dashboardOverview(leadAuth.scope));
+  }
 
   if (domain === "leads") {
     const auth = authorize(request, "leads", "查看");
@@ -61,5 +72,5 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  return NextResponse.json({ error: "domain 仅支持 leads / sales" }, { status: 400 });
+  return NextResponse.json({ error: "domain 仅支持 overview / leads / sales" }, { status: 400 });
 }

@@ -6,9 +6,14 @@
 ## 功能
 
 - 数据仪表盘（chart.js 图表）
+  - 全部指标读 `GET /api/stats?domain=overview` 一次算完（成交额 / 新增线索 / 订单 / 转化率 /
+    30 天趋势 / 漏斗 / 来源 / 商品 / 销售排行），没有硬编码数据；月份对比用「本月至今 vs 上月同期」
 - 线索管理 / 商品管理 / 订单管理
   - 商品目录由 2022-2026 合同汇总表导入（21 个在售服务，含类别 / 单位 / 成交统计），
     种子规则见 `docs/product-catalog-import.md`，可重复执行 `scripts/import-products.py`
+  - 订单按「成交线索」开出（客户、电话、商品直接取自线索，金额取预算区间中值），
+    可重复执行 `scripts/seed-orders.py`
+  - 列表统一每页 10 条
 - 账号管理 / 角色与权限（页面权限 + 功能权限 + 数据范围）
 - 沟通记录
 - 手机号 + 密码登录
@@ -46,7 +51,7 @@ Windows 下也可以直接双击项目根目录的 **`start-all.cmd`**，它会�
 
 ```
 src/app/           页面路由（agent/dashboard/leads/products/orders/accounts/roles/communications/login）
-src/app/api/       API 路由（auth/accounts/leads/orders/products/roles/communications）
+src/app/api/       API 路由（auth/accounts/leads/orders/products/roles/communications/stats）
 src/components/    业务组件（AgentChat 为 AI 助手对话界面，SessionPanel 为会话管理栏，chat/ 为对话原子组件）
 src/hooks/         usePermission 权限判断
 src/lib/crm/       数据访问层（JSON 读写、检索、按数据范围过滤）—— API 与 Agent 的唯一数据出口
