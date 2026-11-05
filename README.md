@@ -1,5 +1,7 @@
-# CRM-V3-AgentBase（Song老师课程用CRM系统）
-<img width="1920" height="878" alt="image" src="https://github.com/user-attachments/assets/b6aa9f81-9ac1-4596-8d65-9cbfdb602365" />
+# CRM Agent 1.0
+
+CRM 客户管理平台 + 本地 AI Agent 服务。前端跑一套完整的多角色 CRM，后端接一个基于 deepagents 的
+Agent 服务，能用自然语言查线索、看统计、改订单，写操作走人工审批。
 
 基础 CRM 业务功能
 
@@ -88,3 +90,26 @@ agent/             DeepAgents + DeepSeek 的 Python Agent 服务（独立 venv�
 - 会话列表与历史消息来自 Agent 服务的 `/sessions`、`/threads/{id}`，历史消息与实时消息共用同一份 `messages` 状态和同一套气泡渲染。
 - 权限：页面 key 为 `agent`，在「角色与权限」中按角色配置访问权（默认管理员、销售均可查看）。
 
+
+## 数据构建脚本
+
+业务数据都由脚本生成，可重复执行、不会产生重复记录（各脚本先清自己写过的号段再重建）：
+
+| 脚本 | 作用 |
+|---|---|
+| `scripts/import-products.py` | 从 2022-2026 合同汇总表导入商品目录（21 个在售服务），含类别 / 单位 / 参考价 / 成交统计 |
+| `scripts/seed-leads.py` | 生成碳核算业务线索与配套沟通记录，状态与跟进节奏挂钩，意向产品取自商品目录 |
+| `scripts/seed-orders.py` | 按「成交线索」开单，客户 / 电话 / 商品取自线索，金额取预算区间中值 |
+| `scripts/rename-assignees.py` | 一次性迁移：把演示销售名换成项目汇总表里的真实负责人 |
+| `scripts/xlsx_read.py` | 纯标准库 xlsx 读取器（zipfile + XML），用于在没有 openpyxl 的环境解析源表 |
+
+## 来源与致谢
+
+本项目在 [songduo/CRM-V3-AgentBase](https://github.com/songduo/CRM-V3-AgentBase) 的基础上继续开发，
+保留了原有的 CRM 页面骨架、鉴权与权限模型；在此基础上新增：
+
+- 数据仪表盘改读真实聚合（`GET /api/stats?domain=overview`），删除全部硬编码 mock
+- 商品目录、线索、订单三套数据从真实合同汇总表重建，并提供可重跑脚本
+- Agent 工具三档权限（查询直通 / 修改人工审批 / 删除禁用）与审批卡片
+- Agent 控制面板（`/agent-settings`）：提示词、工具开关、三态权限、运行指标
+- Agent 服务不可用时的排障卡与统一失败判定
