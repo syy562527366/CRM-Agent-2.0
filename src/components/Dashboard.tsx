@@ -128,6 +128,23 @@ function TrendCharts({ trend }: { trend: DashboardOverview["trend"] }) {
 
   const unitMap = { sales: "元", leads: "个", orders: "单" };
 
+  // 30 个刻度默认会被 autoSkip 抽稀，且末尾今天这一格常被跳过 —— 手写规则：每隔一天一个标签，最后一天必留
+  const options = {
+    ...lineOptions,
+    scales: {
+      ...lineOptions.scales,
+      x: {
+        ...lineOptions.scales.x,
+        ticks: {
+          ...lineOptions.scales.x.ticks,
+          autoSkip: false,
+          callback: (_value: string | number, index: number) =>
+            index === labels.length - 1 || index % 2 === 0 ? labels[index] : "",
+        },
+      },
+    },
+  };
+
   return (
     <div style={CARD}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
@@ -157,7 +174,7 @@ function TrendCharts({ trend }: { trend: DashboardOverview["trend"] }) {
         </div>
       </div>
       <div style={{ height: 260 }}>
-        <Line data={chartData} options={lineOptions} />
+        <Line data={chartData} options={options} />
       </div>
       <div style={{ textAlign: "center", fontSize: 11, color: "#94A3B8", marginTop: 8 }}>
         近 {trend.length} 天{palette.label}趋势（单位：{unitMap[tab]}）
