@@ -184,6 +184,26 @@ export default function Sidebar({ activeItem }: SidebarProps) {
                 <span>Agent 控制面板</span>
               </Link>
             )}
+            {canManage && (
+              <Link
+                href="/agent-kb"
+                className={`flex items-center gap-3 px-3.5 py-2.5 rounded-lg text-sm font-medium transition-all duration-150 cursor-pointer mb-0.5 relative ${
+                  activeItem === "agent-kb"
+                    ? "bg-blue-500/15 text-blue-400 before:absolute before:left-[-12px] before:top-1/2 before:-translate-y-1/2 before:w-[3px] before:h-5 before:bg-blue-500 before:rounded-r"
+                    : "text-slate-500 hover:bg-white/5 hover:text-slate-300"
+                }`}
+              >
+                <span className={`w-5 h-5 shrink-0 ${activeItem === "agent-kb" ? "opacity-100" : "opacity-80"}`}>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+                    <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+                    <line x1="9" y1="7" x2="16" y2="7" />
+                    <line x1="9" y1="11" x2="16" y2="11" />
+                  </svg>
+                </span>
+                <span>知识库管理</span>
+              </Link>
+            )}
           </>
         )}
       </nav>

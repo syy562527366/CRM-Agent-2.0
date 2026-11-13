@@ -52,7 +52,7 @@ Windows 下也可以直接双击项目根目录的 **`start-all.cmd`**，它会�
 ## 目录结构
 
 ```
-src/app/           页面路由（agent/dashboard/leads/products/orders/accounts/roles/communications/login）
+src/app/           页面路由（agent/agent-settings/agent-kb/dashboard/leads/products/orders/accounts/roles/communications/login）
 src/app/api/       API 路由（auth/accounts/leads/orders/products/roles/communications/stats）
 src/components/    业务组件（AgentChat 为 AI 助手对话界面，SessionPanel 为会话管理栏，chat/ 为对话原子组件）
 src/hooks/         usePermission 权限判断
@@ -81,14 +81,15 @@ agent/             DeepAgents + DeepSeek 的 Python Agent 服务（独立 venv�
 - 消息布局：用户消息右侧蓝色气泡，Agent 左侧白底气泡，两者各带头像；正文走 `react-markdown` + `remark-gfm`（表格带斑马纹与悬浮高亮、代码块带语言角标与「复制」按钮、引用块带主色左边线）。
 - 工具调用面板：Agent 气泡上方以可折叠面板展示每次工具调用，六态配色（执行中蓝 / 完成绿 / 失败红 / 待审批黄 / 已批准绿 / 已拒绝红），展开可见工具用途、参数与返回值；并发工具按 `tool_call_id` 精确配对。
 - 人工审批卡：修改类工具（`crm_update_lead` / `crm_update_order`）调用后暂停，弹出审批卡展示「改哪条、改什么」，批准才落库、拒绝则不执行；删除能力对 Agent 关闭。
-- Agent 控制面板（`/agent-settings`，仅管理员）：概览页展示服务健康、模型连通性、今日调用次数、平均响应耗时、工具调用次数与 Token 消耗（含 7 日趋势与工具榜）；配置页可修改系统提示词、逐个开关工具、把工具权限设为「直接使用 / 人工审批 / 禁止」，保存后下一次提问即生效。
-- 线索分析卡片：Agent 输出 ```lead-analysis-card 代码块时渲染为结构化卡片（姓名、意向等级、预算、竞品提及、建议动作），数据来自 `crm_get_lead` 等只读工具。
+- Agent 控制面板（`/agent-settings`，仅管理员）：概览页展示服务健康、模型连通性、今日调用次数、平均响应耗时、工具调用次数与 Token 消耗（含 7 日趋势与工具榜）；配置页可修改系统提示词、逐个开关工具、把工具权限设为「直接使用 / 人工审批 / 禁止」，保存后下一次提问即生效；「Skill 管理」页签列出全部技能，可开关（关闭后模型看不到也读不到）并在弹窗里直接编辑 `SKILL.md`。
+- 线索分析报告：Agent 输出 ```lead-report 代码块（JSON）时，渲染为**五张连续数据卡片**——① 客户与购买意向 ② 意向产品与预算 ③ 未成交原因 ④ 竞品提及 ⑤ 跟进建议。卡片顺序由前端固定，模型无法打乱；整条消息只有卡片时不套气泡，直接铺在对话流里。旧版 ```lead-analysis-card 单卡仍兼容历史会话。
 - 空状态：机器人图标 + 模型与工具能力徽章 + 4 条 CRM 场景引导问句，点击即发送。
-- 组件拆分：`src/components/chat/` 下 Atoms（头像/图标/徽章）、ToolPanel、MarkdownRenderer、LeadAnalysisCard，全部内联样式 + `globals.css` 类，零 Tailwind 依赖。
+- 组件拆分：`src/components/chat/` 下 Atoms（头像/图标/徽章）、ToolPanel、MarkdownRenderer、LeadReportCards（五卡报告）、LeadAnalysisCard（旧版单卡）、DataTableCard，全部内联样式 + `globals.css` 类，零 Tailwind 依赖。
 - 输入框：Enter 发送、Shift + Enter 换行；中文输入法组合态（`isComposing` / `keyCode 229` / 组合结束后 150ms 内）按 Enter 不会误发送。
 - 会话管理栏（左侧）：顶部固定「创建会话」，下方按时间倒序展示历史会话；悬浮条目显删除按钮，**单击即删除**（同时移除服务端记录与 checkpoint）；点击条目加载该会话历史；收起后由详情页顶栏最左侧的「展开」按钮恢复，折叠状态存 `localStorage`。
 - 会话列表与历史消息来自 Agent 服务的 `/sessions`、`/threads/{id}`，历史消息与实时消息共用同一份 `messages` 状态和同一套气泡渲染。
 - 权限：页面 key 为 `agent`，在「角色与权限」中按角色配置访问权（默认管理员、销售均可查看）。
+- 知识库管理（`/agent-kb`，仅管理员）：列出已挂载的知识库文档（标题 / 来源 / 类型 / 切块 / 字数 / 更新时间），可删除（连同切块与向量），不可修改；右上角「上传」支持 `.md` / `.txt` / `.csv` / `.xlsx`，上传后自动切块 + 向量化 + 挂载，页面实时显示「排队 / 解析 / 切块 / 向量化 x% / 写入索引 / 已入库」进度。详见 `docs/agent-knowledge-base.md`。
 
 
 ## 数据构建脚本
@@ -111,5 +112,5 @@ agent/             DeepAgents + DeepSeek 的 Python Agent 服务（独立 venv�
 - 数据仪表盘改读真实聚合（`GET /api/stats?domain=overview`），删除全部硬编码 mock
 - 商品目录、线索、订单三套数据从真实合同汇总表重建，并提供可重跑脚本
 - Agent 工具三档权限（查询直通 / 修改人工审批 / 删除禁用）与审批卡片
-- Agent 控制面板（`/agent-settings`）：提示词、工具开关、三态权限、运行指标
+- Agent 控制面板（`/agent-settings`）：提示词、工具开关、三态权限、Skill 开关与在线编辑、运行指标
 - Agent 服务不可用时的排障卡与统一失败判定

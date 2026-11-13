@@ -6,8 +6,9 @@ import Sidebar from "./Sidebar";
 import SessionPanel, { type SessionMeta } from "./SessionPanel";
 import { BotAvatar, CopyIcon, ThinkingDots, UserAvatar } from "./chat/Atoms";
 import ToolPanel, { type ToolCallView } from "./chat/ToolPanel";
-import MarkdownRenderer from "./chat/MarkdownRenderer";
+import MarkdownRenderer, { type FenceRenderer } from "./chat/MarkdownRenderer";
 import LeadAnalysisCard, { type LeadAnalysisData } from "./chat/LeadAnalysisCard";
+import LeadReportCards, { type LeadReport } from "./chat/LeadReportCards";
 import DataTableCard, { type DataTableCardData } from "./chat/DataTableCard";
 import ApprovalCard, {
   type ApprovalDecision,
@@ -1177,17 +1178,60 @@ function EmptyState({ onPick, health }: { onPick: (text: string) => void; health
   );
 }
 
-/* ========== 线索分析卡片围栏渲染 ========== */
+/* ========== 围栏卡片渲染 ========== */
 
-function renderLeadCard(raw: string) {
+/** `lead-report`：完整五问报告，五张卡片由组件内部按固定顺序排列 */
+const renderLeadReport: FenceRenderer = (raw) => {
+  let data: LeadReport;
+  try {
+    data = JSON.parse(raw) as LeadReport;
+  } catch {
+    // 流式途中 JSON 还没闭合，返回 null 交给渲染器显示占位
+    return null;
+  }
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+
+  // 一个有效字段都没有，说明模型只写了个空对象，继续等
+  const hasContent =
+    Boolean(data.customer || data.intent || data.product || data.loss) ||
+    Boolean(data.competitors?.length) ||
+    Boolean(data.actions?.length);
+  if (!hasContent) return null;
+
+  return <LeadReportCards data={data} />;
+};
+
+/** `lead-analysis-card`：旧版单卡，保留以兼容历史会话 */
+const renderLeadCard: FenceRenderer = (raw) => {
   try {
     const data = JSON.parse(raw) as LeadAnalysisData;
     if (!data || typeof data !== "object" || !data.customer) return null;
     return <LeadAnalysisCard data={data} />;
   } catch {
-    // 流式输出中 JSON 尚未闭合，交给渲染器显示占位动画
     return null;
   }
+};
+
+const FENCES: Record<string, FenceRenderer> = {
+  "lead-report": renderLeadReport,
+  "lead-analysis-card": renderLeadCard,
+};
+
+/**
+ * 整条消息只有一个卡片围栏时，不套气泡。
+ * 否则卡片会被裹进「白底 + 边框 + 内边距」的气泡里，成了卡片套卡片，
+ * 而且两层圆角叠在一起会显得很脏。
+ */
+const CARD_ONLY = /^```(?:lead-report|lead-analysis-card)[\s\S]*?```$/;
+/** 流式途中围栏还没闭合，语言标识可能只敲到一半（```lead-） */
+const CARD_HEAD = /^```lead-/;
+
+function isCardOnly(content: string, streaming?: boolean): boolean {
+  const text = content.trim();
+  if (CARD_ONLY.test(text)) return true;
+  // 生成途中就已经能看出这是卡片消息，提前撤掉气泡，
+  // 避免气泡先出现、卡片出来后气泡又消失的跳动
+  return Boolean(streaming) && CARD_HEAD.test(text);
 }
 
 /* ========== 单条消息 ========== */
@@ -1214,6 +1258,8 @@ function MessageRow({
   // 有工具在跑（或已带回明细卡片 / 审批卡）且还没正文时，只显示面板，不显示空气泡
   const showBubble =
     isUser || !!msg.content || (msg.streaming && !hasTools && !hasCards && !hasApproval);
+  // 纯卡片消息直接铺在对话流里，不套气泡
+  const cardOnly = !isUser && isCardOnly(msg.content ?? "", msg.streaming);
 
   return (
     <div
@@ -1269,6 +1315,10 @@ function MessageRow({
             >
               {msg.content}
             </div>
+          ) : cardOnly ? (
+            <div style={{ width: "100%", minWidth: 0 }}>
+              <MarkdownRenderer content={msg.content} fences={FENCES} streaming={!!msg.streaming} />
+            </div>
           ) : (
             <div
               style={{
@@ -1284,7 +1334,11 @@ function MessageRow({
             >
               {msg.content ? (
                 <>
-                  <MarkdownRenderer content={msg.content} renderCodeBlock={renderLeadCard} />
+                  <MarkdownRenderer
+                    content={msg.content}
+                    fences={FENCES}
+                    streaming={!!msg.streaming}
+                  />
                   {msg.streaming && <span className="chat-cursor" />}
                 </>
               ) : (

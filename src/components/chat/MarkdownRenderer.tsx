@@ -5,13 +5,32 @@
  * - 标题序号徽章、引用块紫条、表格斑马纹 + 悬浮高亮
  * - 代码块深色底 + 语言标签 + 一键复制
  * - 徽章语法糖（[意向：高] / [原因：价格异议] 等）
- * - 特殊围栏 ```lead-analysis-card 交给上层渲染结构化卡片
+ * - 特殊围栏（```lead-report / ```lead-analysis-card）交给上层渲染结构化卡片
+ *
+ * 围栏渲染器的契约：返回 null / undefined 表示「还解析不出来」。
+ * 这时按 `streaming` 区分两种状态 —— 流式中显示占位动画，流式结束后
+ * 显示原始内容与错误提示。少了这个区分，模型写错 JSON 会让占位动画永远转下去，
+ * 用户既看不到卡片也看不到原因。
  */
 import React, { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-export type CodeBlockRenderer = (rawJson: string) => React.ReactNode;
+/** 围栏渲染器：拿到围栏内的原始文本，返回卡片节点；解析不出来就返回 null */
+export type FenceRenderer = (raw: string) => React.ReactNode;
+
+export interface MarkdownOptions {
+  /** 自定义围栏：```<lang> → 渲染器 */
+  fences?: Record<string, FenceRenderer>;
+  /** 是否仍在流式输出，决定围栏解析失败时显示占位还是回退原文 */
+  streaming?: boolean;
+}
+
+/** 围栏语言的展示名，只用于文案 */
+const FENCE_LABEL: Record<string, string> = {
+  "lead-report": "分析卡片",
+  "lead-analysis-card": "分析卡片",
+};
 
 /* ===== 徽章语法糖 ===== */
 const BADGES: Record<string, { bg: string; color: string; label: string }> = {
@@ -148,8 +167,79 @@ function CodeBlock({ lang, code, children }: { lang: string; code: string; child
   );
 }
 
+/* ===== 围栏降级：生成中 / 解析失败 ===== */
+
+function FencePending({ label }: { label: string }) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        margin: "10px 0",
+        padding: "11px 14px",
+        border: "1px solid #E2E8F0",
+        borderRadius: 10,
+        background: "#F8FAFC",
+      }}
+    >
+      <span className="chat-spin" />
+      <span style={{ fontSize: 13, color: "#64748B" }}>正在生成{label}…</span>
+    </div>
+  );
+}
+
+function FenceBroken({ lang, raw }: { lang: string; raw: string }) {
+  return (
+    <div
+      style={{
+        margin: "10px 0",
+        border: "1px solid #FDE68A",
+        borderRadius: 10,
+        background: "#FFFBEB",
+        overflow: "hidden",
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 7,
+          padding: "9px 13px",
+          borderBottom: "1px solid #FEF3C7",
+        }}
+      >
+        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="#D97706" strokeWidth="2" strokeLinecap="round">
+          <path d="M12 9v4M12 17h.01" />
+          <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" />
+        </svg>
+        <span style={{ fontSize: 12.5, fontWeight: 600, color: "#B45309" }}>卡片数据不完整，已显示原始内容</span>
+      </div>
+      <pre
+        style={{
+          margin: 0,
+          padding: "10px 13px",
+          maxHeight: 200,
+          overflow: "auto",
+          fontSize: 11.5,
+          lineHeight: 1.6,
+          color: "#78350F",
+          fontFamily: '"SFMono-Regular", ui-monospace, Menlo, Consolas, monospace',
+          whiteSpace: "pre-wrap",
+          wordBreak: "break-word",
+        }}
+      >
+        {raw || "（空）"}
+      </pre>
+      <div style={{ padding: "0 13px 10px", fontSize: 11, color: "#B45309", opacity: 0.8 }}>
+        围栏标识：{lang || "(未指定)"}
+      </div>
+    </div>
+  );
+}
+
 /* ===== 组件映射 ===== */
-export function createMarkdownComponents(opts?: { renderCodeBlock?: CodeBlockRenderer }) {
+export function createMarkdownComponents(opts?: MarkdownOptions) {
   let headingIndex = 0;
 
   return {
@@ -273,27 +363,19 @@ export function createMarkdownComponents(opts?: { renderCodeBlock?: CodeBlockRen
       const lang = /language-([\w-]+)/.exec(props?.className ?? "")?.[1] ?? "";
       const raw = String(props?.children ?? "");
 
-      // 线索分析卡片：```lead-analysis-card <json>
-      if (lang === "lead-analysis-card") {
-        const rendered = opts?.renderCodeBlock?.(raw.trim());
+      // 自定义围栏：```lead-report / ```lead-analysis-card
+      const custom = lang ? opts?.fences?.[lang] : undefined;
+      if (custom) {
+        const rendered = custom(raw.trim());
         if (rendered !== null && rendered !== undefined) return <>{rendered}</>;
-        return (
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-              margin: "10px 0",
-              padding: "11px 14px",
-              border: "1px solid #E2E8F0",
-              borderRadius: 10,
-              background: "#F8FAFC",
-            }}
-          >
-            <span className="chat-spin" />
-            <span style={{ fontSize: 13, color: "#64748B" }}>正在生成分析卡片…</span>
-          </div>
-        );
+        // 解析不出来：流式中是「JSON 还没闭合」，结束后就是「模型写错了」
+        if (opts?.streaming) return <FencePending label={FENCE_LABEL[lang] ?? "卡片"} />;
+        return <FenceBroken lang={lang} raw={raw.trim()} />;
+      }
+
+      // 流式途中围栏语言只敲了一半（```lead-rep），别让它先闪成一个深色代码块
+      if (opts?.streaming && /^lead-/.test(lang) && !opts?.fences?.[lang]) {
+        return <FencePending label="分析卡片" />;
       }
 
       return (
@@ -337,14 +419,16 @@ export function createMarkdownComponents(opts?: { renderCodeBlock?: CodeBlockRen
 
 export default function MarkdownRenderer({
   content,
-  renderCodeBlock,
+  fences,
+  streaming,
 }: {
   content: string;
-  renderCodeBlock?: CodeBlockRenderer;
+  fences?: Record<string, FenceRenderer>;
+  streaming?: boolean;
 }) {
   return (
     <div className="chat-markdown">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={createMarkdownComponents({ renderCodeBlock })}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={createMarkdownComponents({ fences, streaming })}>
         {content}
       </ReactMarkdown>
     </div>

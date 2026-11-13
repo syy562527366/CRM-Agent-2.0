@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Sidebar from "./Sidebar";
+import SkillManager from "./SkillManager";
 import { useAuth } from "@/context/AuthContext";
 import {
   canManageAgent,
@@ -26,6 +27,7 @@ const TABS = [
   { key: "overview", label: "Agent 概览" },
   { key: "prompt", label: "系统提示词" },
   { key: "tools", label: "工具与权限" },
+  { key: "skills", label: "Skill 管理" },
 ] as const;
 
 type TabKey = (typeof TABS)[number]["key"];
@@ -559,7 +561,7 @@ export default function AgentSettings() {
               Agent 控制面板
             </h1>
             <p style={{ fontSize: 13, color: "#64748B", marginTop: 4, margin: 0 }}>
-              查看运行状态与调用指标，配置系统提示词、可用工具与工具权限
+              查看运行状态与调用指标，配置系统提示词、可用工具与工具权限，管理 Skill 开关与内容
             </p>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -880,8 +882,9 @@ export default function AgentSettings() {
         )}
 
         {/* 配置没读到时不渲染编辑区：空白的提示词框会让人以为「提示词是空的」，
-            然后照着改、保存，实际上什么都没写进去 */}
-        {tab !== "overview" && !config && !loading && (
+            然后照着改、保存，实际上什么都没写进去。Skill 管理不依赖 config（读的是技能目录），
+            所以不受这个限制 */}
+        {(tab === "prompt" || tab === "tools") && !config && !loading && (
           <div style={{ ...CARD, padding: 24, lineHeight: 1.8 }}>
             <div style={{ fontSize: 14, fontWeight: 600, color: "#B91C1C", marginBottom: 6 }}>
               配置未加载
@@ -1175,7 +1178,10 @@ export default function AgentSettings() {
           </div>
         )}
 
-        {loading && !config && (
+        {/* ================= Skill 管理 ================= */}
+        {tab === "skills" && <SkillManager notify={notify} />}
+
+        {loading && !config && tab !== "skills" && (
           <div style={{ padding: "40px 0", textAlign: "center", fontSize: 13, color: "#94A3B8" }}>加载中…</div>
         )}
       </main>

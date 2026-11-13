@@ -150,6 +150,12 @@ export default function DataTableCard({ data }: { data: DataTableCardData }) {
   return (
     <div
       style={{
+        // 消息列是 flex column + align-items:flex-start，子元素默认按内容宽度撑开。
+        // 表格列多、单元格又是 nowrap 时会把整个对话区撑出横向滚动条，
+        // 这里显式钉住 100%，让内部的 overflowX 真正生效。
+        width: "100%",
+        maxWidth: "100%",
+        boxSizing: "border-box",
         marginBottom: 8,
         border: "1px solid #E2E8F0",
         borderRadius: 10,
