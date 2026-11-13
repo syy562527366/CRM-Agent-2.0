@@ -41,6 +41,16 @@ cd agent && ./.venv/Scripts/python.exe app.py
 |---|---|---|
 | GET | `/health` | 健康检查，返回模型 ID、**实际可用工具**（已按控制面板过滤）、运行时长与配置版本 |
 | GET | `/tools` | 已注册工具 |
+| GET | `/skills` | Skill 清单 + 校验结果 + 启用状态（**仅管理员**），详情见 `docs/agent-skills.md` |
+| GET | `/skills/{name}` | 单篇 `SKILL.md` 原文，供控制面板编辑弹窗（**仅管理员**） |
+| PUT | `/skills/{name}` | 覆写 `SKILL.md`：`{content}`，写盘前校验，不过不落盘（**仅管理员**） |
+| POST | `/skills/{name}/toggle` | 启用 / 关闭技能：`{enabled}`，移动目录到 `skills-disabled/`（**仅管理员**） |
+| POST | `/skills/reload` | 清空 Agent 实例缓存并重扫技能目录（**仅管理员**） |
+| GET | `/kb/documents` | 知识库文档清单 + 库统计 + 最近上传任务（**仅管理员**） |
+| GET | `/kb/documents/{doc_id}/chunks` | 单篇文档的切片明细，供管理页抽屉查看切分后的原文（**仅管理员**） |
+| POST | `/kb/upload` | 上传知识库文件：`{filename, content_base64}` → 立即返回 `job_id`，后台解析 / 向量化 / 挂载（**仅管理员**） |
+| GET | `/kb/jobs` | 上传任务进度，前端 1 秒轮询（**仅管理员**） |
+| DELETE | `/kb/documents/{doc_id}` | 删除文档，连同切块与向量（**仅管理员**），详见 `docs/agent-knowledge-base.md` |
 | GET | `/config` | Agent 配置：系统提示词 + 工具开关 + 工具权限（**仅管理员**） |
 | PUT | `/config` | 部分更新：`{"system_prompt"? , "tools"?: {名字: {enabled, permission}}}`（**仅管理员**） |
 | POST | `/config/reset` | 恢复出厂配置（**仅管理员**） |
@@ -76,9 +86,10 @@ CRM 前端「AI 助手」页（`/agent`）通过 Next 的 Route Handler `/agent-
 |---|---|---|
 | `calculator` | AST 安全求值四则运算，不执行 `eval`，除零等错误以「计算失败」文本返回 | — |
 | `get_current_time` | 时区感知的当前时间（Windows 需装 `tzdata`，否则回退 `(local)`） | — |
+| `kb_search` | 本地知识库检索（产品服务 FAQ / 产品信息 / 技能说明 / 项目文档）。`top_k` 默认 5 最大 10，`doc_type` 可选 `faq`/`product`/`skill`/`doc`。详见 `docs/agent-knowledge-base.md` | — |
 | `crm_search_leads` | 按状态 / 优先级 / 来源 / 负责人 / 关键词 / 日期检索线索，返回摘要 | `leads.查看` |
-| `crm_get_lead` | 单条线索详情，手机号与身份证做脱敏 | `leads.查看` |
-| `crm_get_lead_timeline` | 某条线索最近的沟通记录 | `communications.查看` |
+| `crm_get_lead` | 单条线索详情，手机号与身份证做脱敏；`remark_chars` 控制备注返回字数（默认 80，最大 600） | `leads.查看` |
+| `crm_get_lead_timeline` | 某条线索最近的沟通记录；`content_chars` 控制每条内容字数（默认 100，最大 600），做异议 / 竞品分析时要调大 | `communications.查看` |
 | `crm_search_orders` | 检索订单，返回摘要与金额合计 | `orders.查看` |
 | `crm_list_products` | 在售商品与价格 | `products.查看` |
 | `crm_lead_stats` | 线索分组计数（状态 / 来源 / 负责人 / 优先级） | `leads.查看` |
@@ -97,7 +108,9 @@ CRM 工具统一走 HTTP 调 CRM 的 `/api/*`，**不再直读 `data/*.json`**�
 
 `PERMISSION_DENIED` 在提示词里明确要求如实转述、不得绕过。
 
-系统提示词约定：写线索分析结论时，额外输出一个 ```lead-analysis-card 代码块（JSON），前端会把它渲染成结构化卡片，而不是代码块。
+系统提示词约定：分析线索 / 客户时**整条回复只输出一个 ```lead-report 代码块（JSON）**，不写任何文字分析。
+前端按固定顺序把它渲染成五张卡片（客户与意向 / 产品与预算 / 未成交原因 / 竞品 / 建议），
+围栏解析失败时回退显示原始 JSON 而不是空白。卡片字段规范见 `skills/lead-analysis/SKILL.md`。
 
 ## 写操作（只能修改，不能删除）
 
@@ -204,6 +217,28 @@ POST /chat/resume        → {"thread_id","decisions":[{"type":"approve"}]} → 
 - 因此 agent 的 `ls` / `read_file` / `write_file` 可用，但读不到 `agent/.env`、项目 `data/*.json`；
 - 该目录已 gitignore。
 
+## Skill 能力（渐进式披露）
+
+已开通 deepagents 的 `SkillsMiddleware`：技能放在 `agent/skills/<技能名>/SKILL.md`，
+每轮只把 `name` + `description` 注入提示词，模型判断需要时自己 `read_file` 读全文。
+
+- 后端用 `CompositeBackend`：`/skills/` 路由到共享的 `agent/skills/`，其余路径仍落在
+  `agent/workspace/<账号ID>/`，两边都 `virtual_mode=True`，`../` 穿越被拒；
+- 每轮入参带 `skills_metadata=None`（见 `app._turn_input`），所以技能文件改完
+  **下一句话就生效**，不用重启、不用新建会话；
+- `skills_store.py` 负责目录发现与校验：`name` 必须与目录名一致且符合 kebab-case，
+  `description` ≤1024 字符；不合规的技能标 `valid=false` 且**不传给模型**，
+  写坏一处不会污染所有对话；
+- **开关做在目录层**：框架没有 `enabled` 参数，关闭即把目录移到 `agent/skills-disabled/`
+  —— 不在 `/skills/` 路由里，模型既看不到 name/description，也 `read_file` 不到。
+  控制面板「Skill 管理」页签提供开关与 `SKILL.md` 在线编辑，保存前校验、不过不落盘；
+- `GET /skills` 看清单（含 `enabled`），`GET /health` 看 `skills` / `skills_total` / `skills_disabled`。
+
+详细规范、写法与排查见 **`docs/agent-skills.md`**。当前内置三个技能：
+`weekly-report`（销售周报）、`lead-analysis`（客户线索五问分析）、
+`product-faq`（产品FAQ问题解答 —— 按「服务内容 / 适用客户 / 交付与周期 / 计价方式」
+四个维度分别 `kb_search`，查《产品FAQ-1.0》回答产品与采购类问题，不编价不编周期）。
+
 ## 测试
 
 服务启动后：
@@ -231,14 +266,22 @@ agent/.venv/Scripts/python.exe agent/test_write_tools.py
 agent/
 ├── app.py              FastAPI 服务 + deep agent 构建（create_deep_agent）
 ├── tools.py            通用工具：calculator / get_current_time
+├── tools_kb.py         知识库检索工具 kb_search
+├── kb/                 本地知识库（sqlite-vec + Qwen3-Embedding）
+│   ├── upload.py       上传文件解析（文本 / CSV / Excel）
+│   └── jobs.py         上传任务状态机（进度 + 串行执行）
 ├── tools_crm.py        CRM 只读工具 7 个（走 HTTP API）
 ├── tools_crm_write.py  CRM 写工具 4 个：改线索 / 改订单 / 删线索 / 删订单
 ├── crm_client.py       身份解析（x-crm-context）+ CRM API 客户端 + 错误映射
+├── skills_store.py     技能目录发现 / 校验 / 启用开关 / 复合后端构建
+├── skills/             技能包（SKILL.md，随 git 走，所有账号共用）
+├── skills-disabled/    已关闭的技能（移出 /skills/ 路由，模型完全看不到）
 ├── test_agent.py       冒烟测试（7 项，含模型调用）
 ├── test_write_tools.py 写操作测试（28 项，直调工具函数，自动清理数据）
 ├── requirements.txt
 ├── workspace/          每个账号一个子目录（FilesystemBackend 的真实落点，已 gitignore）
 ├── data/agent.db       对话状态 + 会话索引（SQLite，已 gitignore）
+├── data/kb.sqlite3     知识库（文档 / 切块 / 向量，已 gitignore）
 ├── data/audit.jsonl    写操作审计日志（已 gitignore）
 ├── data/trash.jsonl    删除前的记录留底（已 gitignore）
 └── .env                API Key、Base URL、模型 ID（已 gitignore）

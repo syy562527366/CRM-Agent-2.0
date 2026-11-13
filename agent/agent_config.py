@@ -76,6 +76,12 @@ REGISTRY: dict[str, dict[str, Any]] = {
         "permission": "direct",
         "summary": "按指定时区取当前时间",
     },
+    "kb_search": {
+        "label": "知识库检索",
+        "category": "query",
+        "permission": "direct",
+        "summary": "在本地知识库检索产品服务 FAQ、技能说明、项目文档",
+    },
     "crm_search_leads": {
         "label": "查询线索",
         "category": "query",

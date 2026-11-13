@@ -6,6 +6,16 @@
 接口：
     GET    /health             健康检查（含模型信息 / 运行时长 / 配置版本）
     GET    /tools              已注册工具列表
+    GET    /skills             已加载的 Skill 列表与校验结果（仅管理员）
+    GET    /skills/{name}      单篇技能的 SKILL.md 原文（仅管理员）
+    PUT    /skills/{name}      覆写 SKILL.md，写盘前校验（仅管理员）
+    POST   /skills/{name}/toggle  启用 / 关闭技能（移动目录，仅管理员）
+    POST   /skills/reload      清空 Agent 实例缓存，强制重读技能目录（仅管理员）
+    GET    /kb/documents       知识库文档清单 + 库统计（仅管理员）
+    GET    /kb/documents/{id}/chunks  单篇文档的切块明细（仅管理员）
+    POST   /kb/upload          上传知识库文件，异步解析 / 向量化 / 挂载（仅管理员）
+    GET    /kb/jobs            上传任务进度，供前端轮询（仅管理员）
+    DELETE /kb/documents/{id}  删除一篇知识库文档（仅管理员）
     GET    /config             Agent 配置（提示词 + 工具开关 + 权限，仅管理员）
     PUT    /config             部分更新配置（提示词 / 工具开关 / 权限，仅管理员）
     POST   /config/reset       恢复出厂配置（仅管理员）
@@ -26,6 +36,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -37,7 +48,6 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterator
 
-from deepagents.backends import FilesystemBackend
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import StreamingResponse
@@ -49,20 +59,28 @@ from pydantic import BaseModel, Field
 
 import agent_config as cfg
 import metrics
+import skills_store
 import tools_guard as guard
 from crm_client import CrmCtx
 from tools import TOOLS as BASE_TOOLS
 from tools_crm import CRM_TOOLS
 from tools_crm_write import CRM_UPDATE_TOOLS
+from tools_kb import KB_TOOLS
 
-# 可注册给模型的工具池：通用工具 + CRM 只读工具 + CRM 修改工具。
+# 可注册给模型的工具池：通用工具 + 知识库检索 + CRM 只读工具 + CRM 修改工具。
 # 删除工具（crm_delete_lead / crm_delete_order）**刻意不在池子里**：
 # 产品要求 Agent 不得删除数据，模型看不到工具就不会去调用；
 # 即使被误注册，工具入口还有 AGENT_DELETE_ENABLED 兜底。
 # 运行时还会按「Agent 控制面板」的开关再过滤一次（见 _build_agent）。
-TOOLS = [*BASE_TOOLS, *CRM_TOOLS, *CRM_UPDATE_TOOLS]
+TOOLS = [*BASE_TOOLS, *KB_TOOLS, *CRM_TOOLS, *CRM_UPDATE_TOOLS]
 
 STARTED_AT = time.time()
+
+logger = logging.getLogger("agent")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
@@ -258,10 +276,12 @@ def create_agent_with(model: ChatDeepSeek, workspace: str = "_shared"):
     root = WORKSPACE_DIR / workspace
     root.mkdir(parents=True, exist_ok=True)
 
-    # 用 FilesystemBackend 让 ls / read_file / write_file 落到真实磁盘（重启不丢）。
-    # virtual_mode=True 把这个目录当成虚拟根：绝对路径和 ".." 都会被挡住，
+    # 复合后端：
+    #   /skills/  → agent/skills/（产品级技能，所有账号共用同一份，跟 git 走）
+    #   其余路径   → agent/workspace/<uid>/（本账号私有草稿区）
+    # 两边都是 virtual_mode=True：绝对路径与 ".." 会被拒，
     # 因此 agent/.env、项目 data/*.json 这些敏感文件读不到。
-    backend = FilesystemBackend(root_dir=str(root), virtual_mode=True)
+    backend = skills_store.build_backend(root)
 
     enabled = cfg.effective_tool_names()
     approval = cfg.approval_tool_names()
@@ -274,6 +294,9 @@ def create_agent_with(model: ChatDeepSeek, workspace: str = "_shared"):
         system_prompt=cfg.current_prompt(),
         checkpointer=checkpointer,
         backend=backend,
+        # Skill 能力：只把已通过校验的技能目录交给框架。
+        # 框架只把 name + description 注入提示词，模型需要时自己 read_file 取全文。
+        skills=[skills_store.SKILLS_ROUTE],
         # 权限=人工审批 的工具每次调用都会暂停等人批（approve / reject），
         # 中断点落在 checkpointer 里，进程重启也能接着批。
         interrupt_on=guard.build_interrupt_on(approval),
@@ -297,6 +320,16 @@ def _config(
 def _parse_identity(context: str, token: str, user_id: str) -> CrmCtx:
     """把 Next 代理注入的 x-crm-* 头还原成调用者上下文。"""
     return CrmCtx.from_headers(context, token=token, uid=user_id)
+
+
+def _turn_input(message: str) -> dict[str, Any]:
+    """一轮对话的初始状态。
+
+    `skills_metadata=None` 是框架约定的「请重读技能目录」信号：
+    技能文件新增 / 修改 / 删除后，下一句话就生效，不用新建会话，
+    也不会因为某个 thread 早先缓存过技能列表就看不到新技能。
+    """
+    return {"messages": [HumanMessage(content=message)], "skills_metadata": None}
 
 
 def _drain(sink: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -452,6 +485,7 @@ class SessionRename(BaseModel):
 @app.get("/health")
 def health() -> dict[str, Any]:
     enabled = cfg.effective_tool_names()
+    skills_all = skills_store.list_skills()
     return {
         "status": "ok",
         "framework": "deepagents",
@@ -464,7 +498,46 @@ def health() -> dict[str, Any]:
         # 这里回的是「模型实际能用的工具」，关掉的不会出现 —— 便于一眼确认配置生效
         "tools": [tool.name for tool in TOOLS if tool.name in enabled],
         "tools_total": len(TOOLS),
+        # 技能同理：只列「启用且通过校验」的，关闭的与坏掉的在 /skills 里带开关 / errors
+        "skills": [item["name"] for item in skills_all if item["valid"] and item["enabled"]],
+        "skills_total": len(skills_all),
+        "skills_disabled": sum(1 for item in skills_all if not item["enabled"]),
+        "kb": _kb_status(),
     }
+
+
+# 知识库状态缓存：每 30s 才真查一次。health 会被监控高频轮询，
+# 每次都开 SQLite + 加载扩展没必要。
+_kb_cache: dict[str, Any] = {"at": 0.0, "value": {}}
+
+
+def _kb_status() -> dict[str, Any]:
+    now = time.time()
+    if now - _kb_cache["at"] < 30 and _kb_cache["value"]:
+        return _kb_cache["value"]
+
+    try:
+        from kb.config import load_config as load_kb_config
+        from kb.store import KBStore
+
+        kb_cfg = load_kb_config()
+        if not kb_cfg.db_path.exists():
+            value: dict[str, Any] = {"ready": False, "reason": "尚未初始化，执行 python -m kb.cli init"}
+        else:
+            with KBStore(kb_cfg) as store:
+                st = store.stats()
+            value = {
+                "ready": True,
+                "docs": st["docs"],
+                "chunks": st["chunks"],
+                "dim": st["dim"],
+                "model": st["model"],
+            }
+    except Exception as exc:  # noqa: BLE001 - 健康检查不能因为知识库挂了就 500
+        value = {"ready": False, "reason": f"{type(exc).__name__}: {exc}"[:160]}
+
+    _kb_cache.update(at=now, value=value)
+    return value
 
 
 def _require_admin(ctx: CrmCtx) -> None:
@@ -590,6 +663,310 @@ def list_tools() -> dict[str, Any]:
     }
 
 
+@app.get("/skills")
+def get_skills(
+    x_crm_context: str = Header(default=""),
+    x_crm_token: str = Header(default=""),
+    x_crm_user: str = Header(default=""),
+) -> dict[str, Any]:
+    """技能清单与校验结果。
+
+    返回 `valid=false` 的技能不会进 Agent —— 写坏了只会在控制面板报警，
+    不会污染模型上下文。排查「为什么模型没看到我的技能」先看这里。
+    """
+    ctx = _parse_identity(x_crm_context, x_crm_token, x_crm_user)
+    _require_admin(ctx)
+    return skills_store.summary()
+
+
+@app.post("/skills/reload")
+def post_skills_reload(
+    x_crm_context: str = Header(default=""),
+    x_crm_token: str = Header(default=""),
+    x_crm_user: str = Header(default=""),
+) -> dict[str, Any]:
+    """清空 Agent 实例缓存并重扫技能目录。
+
+    正常改技能内容不需要调这个：每轮对话都会以 `skills_metadata=None` 触发重读，
+    保存文件后下一句话就生效。只有改了 `AGENT_SKILLS_DIR` 之类的路径配置，
+    或者怀疑缓存没刷新时才需要显式重载。
+    """
+    ctx = _parse_identity(x_crm_context, x_crm_token, x_crm_user)
+    _require_admin(ctx)
+    _build_agent.cache_clear()
+    return {"ok": True, "reloaded_by": ctx.name or ctx.uid, **skills_store.summary()}
+
+
+@app.get("/skills/{name}")
+def get_skill_detail(
+    name: str,
+    x_crm_context: str = Header(default=""),
+    x_crm_token: str = Header(default=""),
+    x_crm_user: str = Header(default=""),
+) -> dict[str, Any]:
+    """单篇技能的 SKILL.md 原文，供「Skill 管理」的编辑弹窗使用。"""
+    ctx = _parse_identity(x_crm_context, x_crm_token, x_crm_user)
+    _require_admin(ctx)
+    try:
+        return {"ok": True, "skill": skills_store.read_skill(name)}
+    except skills_store.SkillError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+class SkillSaveReq(BaseModel):
+    content: str = Field(..., min_length=1, max_length=200_000, description="SKILL.md 全文")
+
+
+@app.put("/skills/{name}")
+def put_skill(
+    name: str,
+    req: SkillSaveReq,
+    x_crm_context: str = Header(default=""),
+    x_crm_token: str = Header(default=""),
+    x_crm_user: str = Header(default=""),
+) -> dict[str, Any]:
+    """覆写 SKILL.md。
+
+    写盘前按与启动时同一套规则校验（frontmatter 齐全、`name` 等于目录名、
+    正文非空），校验不过直接 400 且**不落盘** —— 否则控制面板里改错一处，
+    技能立刻变 invalid，模型下一轮就丢掉它，现场还被覆盖了。
+
+    保存后清 Agent 缓存：下一句话就按新内容执行，不用重启服务。
+    """
+    ctx = _parse_identity(x_crm_context, x_crm_token, x_crm_user)
+    _require_admin(ctx)
+    try:
+        skill = skills_store.save_skill(name, req.content)
+    except skills_store.SkillError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    _build_agent.cache_clear()
+    logger.info("技能已更新 name=%s by=%s bytes=%s", name, ctx.uid, len(req.content))
+    return {"ok": True, "skill": skill, "updated_by": ctx.name or ctx.uid, **skills_store.summary()}
+
+
+class SkillToggleReq(BaseModel):
+    enabled: bool
+
+
+@app.post("/skills/{name}/toggle")
+def post_skill_toggle(
+    name: str,
+    req: SkillToggleReq,
+    x_crm_context: str = Header(default=""),
+    x_crm_token: str = Header(default=""),
+    x_crm_user: str = Header(default=""),
+) -> dict[str, Any]:
+    """启用 / 关闭技能。
+
+    实现是**移动目录**（`skills/` ↔ `skills-disabled/`）：框架的 SkillsMiddleware
+    只扫来源目录顶层，没有开关参数，目录留在原地就仍会注入提示词、仍能被
+    `read_file` 读到。「移出去」才是真的不可用 —— 关闭后模型既看不到它的
+    name/description，也读不到正文。
+    """
+    ctx = _parse_identity(x_crm_context, x_crm_token, x_crm_user)
+    _require_admin(ctx)
+    try:
+        skill = skills_store.set_enabled(name, req.enabled)
+    except skills_store.SkillError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    _build_agent.cache_clear()
+    logger.info("技能%s name=%s by=%s", "启用" if req.enabled else "关闭", name, ctx.uid)
+    return {
+        "ok": True,
+        "skill": skill,
+        "changed_by": ctx.name or ctx.uid,
+        **skills_store.summary(),
+    }
+
+
+@app.get("/kb/documents")
+def kb_documents(
+    x_crm_context: str = Header(default=""),
+    x_crm_token: str = Header(default=""),
+    x_crm_user: str = Header(default=""),
+) -> dict[str, Any]:
+    """知识库管理页的数据源：库统计 + 已挂载文档清单。"""
+    ctx = _parse_identity(x_crm_context, x_crm_token, x_crm_user)
+    _require_admin(ctx)
+
+    try:
+        from kb.config import load_config as load_kb_config
+        from kb.store import KBStore
+
+        kb_cfg = load_kb_config()
+        if not kb_cfg.db_path.exists():
+            return {"ready": False, "reason": "知识库尚未初始化", "stats": None, "docs": [], "jobs": []}
+
+        with KBStore(kb_cfg) as store:
+            stats = store.stats()
+            docs = store.list_documents()
+
+        from kb import jobs as kb_jobs
+
+        return {
+            "ready": True,
+            "stats": stats,
+            "docs": docs,
+            "jobs": kb_jobs.list_jobs(limit=10),
+            "running": kb_jobs.has_running(),
+        }
+    except Exception as exc:  # noqa: BLE001 - 页面要能显示原因，而不是整页崩
+        return {
+            "ready": False,
+            "reason": f"{type(exc).__name__}: {exc}"[:200],
+            "stats": None,
+            "docs": [],
+            "jobs": [],
+            "running": False,
+        }
+
+
+@app.get("/kb/documents/{doc_id}/chunks")
+def kb_document_chunks(
+    doc_id: int,
+    limit: int = 500,
+    x_crm_context: str = Header(default=""),
+    x_crm_token: str = Header(default=""),
+    x_crm_user: str = Header(default=""),
+) -> dict[str, Any]:
+    """单篇文档的切块明细，供管理页抽屉查看「切完之后长什么样」。
+
+    正文直接取 kb_chunks.content —— 向量没法反解成文本，能给人看的就是入库
+    时那段切块原文。单块上限 700 字（chunker 默认），一次返回整篇没有压力；
+    limit 只是兜底，正常文档远到不了 500 块。
+    """
+    ctx = _parse_identity(x_crm_context, x_crm_token, x_crm_user)
+    _require_admin(ctx)
+
+    from kb.config import load_config as load_kb_config
+    from kb.store import KBStore
+
+    capped = max(1, min(limit, 2000))
+    with KBStore(load_kb_config()) as store:
+        doc = store.get_document(doc_id)
+        if doc is None:
+            raise HTTPException(status_code=404, detail=f"文档不存在：#{doc_id}")
+        chunks = store.list_chunks(doc_id, limit=capped)
+
+    return {
+        "ok": True,
+        "doc": doc,
+        "chunks": chunks,
+        "total": doc["chunks"],
+        "truncated": len(chunks) < doc["chunks"],
+    }
+
+
+class KbUploadReq(BaseModel):
+    filename: str = Field(..., min_length=1, max_length=200)
+    content_base64: str = Field(..., min_length=1, description="文件内容的 base64")
+
+
+@app.post("/kb/upload")
+def kb_upload(
+    req: KbUploadReq,
+    x_crm_context: str = Header(default=""),
+    x_crm_token: str = Header(default=""),
+    x_crm_user: str = Header(default=""),
+) -> dict[str, Any]:
+    """上传知识库文件，异步解析 + 向量化 + 挂载。
+
+    为什么用 base64 JSON 而不是 multipart：`/agent-api/*` 那层代理统一按
+    JSON 透传（`content-type: application/json`），multipart 过不去。
+    知识库文件都是几十 KB 的文本/表格，base64 膨胀 33% 也无所谓。
+
+    立即返回 job_id，前端轮询 `/kb/jobs` 看进度 —— embedding 是秒级操作，
+    同步等会让上传按钮转圈十几秒，看起来像卡死。
+    """
+    ctx = _parse_identity(x_crm_context, x_crm_token, x_crm_user)
+    _require_admin(ctx)
+
+    from kb import jobs as kb_jobs
+    from kb.upload import MAX_UPLOAD_BYTES, UploadError, check_ext, normalize_filename
+
+    try:
+        name = normalize_filename(req.filename)
+        check_ext(name)
+    except UploadError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # base64 比原文长 4/3，先按编码后长度挡一次，避免为超大文件白解码
+    if len(req.content_base64) > MAX_UPLOAD_BYTES * 4 // 3 + 1024:
+        raise HTTPException(
+            status_code=413,
+            detail=f"文件超过 {MAX_UPLOAD_BYTES // 1024 // 1024} MB 上限",
+        )
+
+    try:
+        data = base64.b64decode(req.content_base64, validate=True)
+    except Exception as exc:  # noqa: BLE001 - 非法 base64 统一按参数错误返回
+        raise HTTPException(status_code=400, detail="文件内容不是合法的 base64") from exc
+
+    if not data:
+        raise HTTPException(status_code=400, detail="文件是空的")
+
+    job = kb_jobs.submit(name, data, on_done=_invalidate_kb_cache)
+    logger.info("知识库上传任务已创建 job=%s file=%s bytes=%s by=%s", job["job_id"], name, len(data), ctx.uid)
+    return {"ok": True, "job": job}
+
+
+@app.get("/kb/jobs")
+def kb_jobs_list(
+    x_crm_context: str = Header(default=""),
+    x_crm_token: str = Header(default=""),
+    x_crm_user: str = Header(default=""),
+) -> dict[str, Any]:
+    """上传统计进度：轮询这个接口刷新进度条。"""
+    ctx = _parse_identity(x_crm_context, x_crm_token, x_crm_user)
+    _require_admin(ctx)
+
+    from kb import jobs as kb_jobs
+
+    return {"jobs": kb_jobs.list_jobs(limit=10), "running": kb_jobs.has_running()}
+
+
+@app.delete("/kb/documents/{doc_id}")
+def kb_delete_document(
+    doc_id: int,
+    x_crm_context: str = Header(default=""),
+    x_crm_token: str = Header(default=""),
+    x_crm_user: str = Header(default=""),
+) -> dict[str, Any]:
+    """删除一篇已挂载文档（连同切块与向量）。
+
+    只提供删除、不提供修改：改内容等于重新向量化，直接让用户重新上传同名文件
+    更可控（doc_key 相同会原地替换），也避免「改了一半」的半成品文档。
+    """
+    ctx = _parse_identity(x_crm_context, x_crm_token, x_crm_user)
+    _require_admin(ctx)
+
+    from kb.config import load_config as load_kb_config
+    from kb.store import KBStore
+
+    with KBStore(load_kb_config()) as store:
+        if not store.delete_document_by_id(doc_id):
+            raise HTTPException(status_code=404, detail=f"文档不存在：#{doc_id}")
+        stats = store.stats()
+
+    from kb import jobs as kb_jobs
+
+    kb_jobs.forget_document(doc_id)
+    _invalidate_kb_cache()
+    logger.info("知识库文档已删除 doc_id=%s by=%s", doc_id, ctx.uid)
+    return {"ok": True, "doc_id": doc_id, "stats": stats}
+
+
+def _invalidate_kb_cache() -> None:
+    """清掉 /health 里 30 秒的知识库统计缓存。
+
+    上传/删除后如果不清，健康卡片要过一会儿才跳数字，
+    看起来像「操作没生效」。
+    """
+    _kb_cache["at"] = 0.0
+
+
 @app.get("/whoami")
 def whoami(
     x_crm_user: str = Header(default=""),
@@ -660,10 +1037,13 @@ def chat(
     try:
         agent = get_agent(_workspace_name(ctx.uid or req.user_id))
         result = agent.invoke(
-            {"messages": [HumanMessage(content=req.message)]},
+            _turn_input(req.message),
             config=config,
         )
     except Exception as exc:  # noqa: BLE001 - 统一转成 502，便于前端展示
+        # 堆栈只进服务端日志：前端要的是人能看懂的一句话，
+        # 排障要的是完整 traceback，两边别混在一起。
+        logger.exception("chat 执行失败 thread=%s uid=%s", req.thread_id, ctx.uid or req.user_id)
         metrics.record(
             duration_ms=int((time.perf_counter() - started_at) * 1000),
             uid=ctx.uid or req.user_id,
@@ -817,6 +1197,7 @@ def _stream_events(
                     yield _sse({"type": "tool_data", **card})
     except Exception as exc:  # noqa: BLE001 - SSE 内无法改状态码，用事件告知
         ok, error_text = False, str(exc)
+        logger.exception("stream 执行失败 thread=%s uid=%s", thread_id, getattr(ctx, "uid", "") or user_id)
         yield _sse({"type": "error", "content": f"{exc}"})
         return
     finally:
@@ -897,7 +1278,7 @@ def chat_stream(
 
         yield from _stream_events(
             agent,
-            {"messages": [HumanMessage(content=req.message)]},
+            _turn_input(req.message),
             config,
             req.thread_id,
             user_id,

@@ -24,7 +24,19 @@ MAX_LIMIT = 50
 LEAD_STATUSES = ("成交", "客户流失", "未接触", "长期未跟进", "推荐产品", "价格异议")
 PRIORITIES = ("high", "medium", "low")
 LEAD_SORTS = ("lastFollowUpAt", "createdAt", "communicationCount")
-LEAD_BRIEF = ("id", "name", "status", "priority", "assignee", "source", "lastFollowUpAt")
+# 列表摘要字段。`intentProduct` 必须有：模型被要求「按产品/品类筛线索」时，
+# 没有这个字段就只能逐条 crm_get_lead，一条线索一次 HTTP，30 条线索的筛选
+# 会变成 30 次调用（实测响应慢十几倍）。前端 COLUMN_LABEL 里也早就有这一列。
+LEAD_BRIEF = (
+    "id",
+    "name",
+    "status",
+    "priority",
+    "assignee",
+    "source",
+    "intentProduct",
+    "lastFollowUpAt",
+)
 ORDER_BRIEF = ("orderNo", "customerName", "productName", "amount", "createdAt")
 
 
@@ -71,6 +83,19 @@ def _clamp(limit: int, default: int = 10) -> int:
     except (TypeError, ValueError):
         return default
     return max(1, min(value, MAX_LIMIT))
+
+
+def _clamp_chars(value: int, default: int = 100) -> int:
+    """文本截断长度：默认值保持原样，允许调到 600 字做深度分析。
+
+    不设成无限长是为了守住上下文：一屏 20 条 × 600 字已经接近 6k token，
+    再长就该换检索而不是继续塞。
+    """
+    try:
+        size = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(20, min(size, 600))
 
 
 def _normalize_status(raw: str) -> tuple[str, str]:
@@ -192,11 +217,12 @@ def crm_search_leads(
 
 
 @tool
-def crm_get_lead(lead_id: str, config: RunnableConfig = None) -> str:
+def crm_get_lead(lead_id: str, remark_chars: int = 80, config: RunnableConfig = None) -> str:
     """查看单个线索的完整详情（手机号、身份证已脱敏）。
 
     Args:
         lead_id: 线索编号，例如 LD-2026-0002。可先用 crm_search_leads 拿到。
+        remark_chars: 备注返回多少字，默认 80，可调到 600。要做客户背景深挖时调大。
     """
     ctx, denied = _guard(config, "leads")
     if denied:
@@ -205,6 +231,8 @@ def crm_get_lead(lead_id: str, config: RunnableConfig = None) -> str:
     lead_id = (lead_id or "").strip()
     if not lead_id:
         return dump(fail("INVALID_ARGUMENT", "请提供线索编号，例如 LD-2026-0002"))
+
+    remark_chars = _clamp_chars(remark_chars, default=80)
 
     with CrmClient(ctx) as client:
         result = client.get(f"/api/leads/{lead_id}")
@@ -227,7 +255,7 @@ def crm_get_lead(lead_id: str, config: RunnableConfig = None) -> str:
         "trialDuration": row.get("trialDuration", ""),
         "createdAt": row.get("createdAt", ""),
         "lastFollowUpAt": row.get("lastFollowUpAt", ""),
-        "remark": str(row.get("remark") or "")[:80],
+        "remark": str(row.get("remark") or "")[:remark_chars],
     }
 
     # 线索备注是用户自由输入的文本，明确与指令区隔，降低 prompt injection 风险
@@ -240,12 +268,16 @@ def crm_get_lead(lead_id: str, config: RunnableConfig = None) -> str:
 
 
 @tool
-def crm_get_lead_timeline(lead_id: str, limit: int = 10, config: RunnableConfig = None) -> str:
+def crm_get_lead_timeline(
+    lead_id: str, limit: int = 10, content_chars: int = 100, config: RunnableConfig = None
+) -> str:
     """查看某条线索最近的沟通记录（时间 / 渠道 / 发送人 / 内容摘要）。
 
     Args:
         lead_id: 线索编号，例如 LD-2026-0002。
         limit: 最多返回条数，默认 10，最大 50。
+        content_chars: 每条沟通内容返回多少字，默认 100，可调到 600。
+            分析异议、竞品、成交/流失原因时调大，否则关键信息会被截断。
     """
     ctx, denied = _guard(config, "communications")
     if denied:
@@ -256,6 +288,7 @@ def crm_get_lead_timeline(lead_id: str, limit: int = 10, config: RunnableConfig 
         return dump(fail("INVALID_ARGUMENT", "请提供线索编号，例如 LD-2026-0002"))
 
     size = _clamp(limit, default=10)
+    text_len = _clamp_chars(content_chars, default=100)
     with CrmClient(ctx) as client:
         result = client.list(
             "/api/communications", {"leadId": lead_id, "page": 1, "pageSize": size}
@@ -270,7 +303,7 @@ def crm_get_lead_timeline(lead_id: str, limit: int = 10, config: RunnableConfig 
             "channel": row.get("channel", ""),
             "sender": row.get("sender", ""),
             "senderRole": row.get("senderRole", ""),
-            "content": str(row.get("content") or "")[:100],
+            "content": str(row.get("content") or "")[:text_len],
         }
         for row in result["items"]
     ]

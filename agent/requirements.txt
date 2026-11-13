@@ -10,3 +10,7 @@ python-dotenv==1.2.4
 requests==2.34.2
 httpx==0.28.1
 tzdata
+# 本地知识库：向量检索扩展（wheel 内含 vec0.dll，无需编译）
+sqlite-vec==0.1.9
+# 导入产品服务 FAQ.xlsx 用
+openpyxl>=3.1.0
