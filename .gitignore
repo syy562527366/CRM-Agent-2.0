@@ -13,6 +13,11 @@ __pycache__/
 agent/.env
 agent/data/
 .env
+.env.local
+*.env.local
+
+# 临时脚本与中间产物
+.tmp/
 
 # WorkBuddy 工作区元数据
 .workbuddy/
