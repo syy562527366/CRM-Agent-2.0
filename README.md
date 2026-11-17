@@ -1,4 +1,4 @@
-# CRM Agent 1.0
+# CRM Agent 2.0
 
 CRM 客户管理平台 + 本地 AI Agent 服务。前端跑一套完整的多角色 CRM，后端接一个基于 deepagents 的
 Agent 服务，能用自然语言查线索、看统计、改订单，写操作走人工审批。
